@@ -10,6 +10,7 @@ import {
   EyeOff,
   Globe,
   KeyRound,
+  Loader2,
   Lock,
   ShieldCheck,
   User,
@@ -36,9 +37,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [password, setPassword] = useState(expectedPassword);
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoggingIn) return;
     if (!username.trim() || !password.trim()) {
       setErrorMsg(
         storeSettings.language === 'id'
@@ -57,9 +60,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     setErrorMsg('');
+    setIsLoggingIn(true);
+    await new Promise((r) => setTimeout(r, 400));
     const displayUser = username.includes('@')
       ? username.split('@')[0]
       : username.trim();
+    setIsLoggingIn(false);
     onLoginSuccess(displayUser);
   };
 
@@ -553,11 +559,25 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
           <button
             type="submit"
+            disabled={isLoggingIn}
             style={{ backgroundColor: primaryColor }}
-            className="w-full py-3.5 sm:py-4 rounded-2xl text-white font-bold text-sm sm:text-base shadow-lg hover:opacity-95 active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2"
+            className="w-full py-3.5 sm:py-4 rounded-2xl text-white font-bold text-sm sm:text-base shadow-lg hover:opacity-95 disabled:opacity-70 active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2"
           >
-            <KeyRound className="w-4 h-4" />
-            <span>{t.loginButton}</span>
+            {isLoggingIn ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>
+                  {storeSettings.language === 'id'
+                    ? 'Memverifikasi...'
+                    : 'Signing in...'}
+                </span>
+              </>
+            ) : (
+              <>
+                <KeyRound className="w-4 h-4" />
+                <span>{t.loginButton}</span>
+              </>
+            )}
           </button>
         </form>
       </div>

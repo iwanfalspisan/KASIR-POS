@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  CategoryItem,
   OrderRecord,
   ProductItem,
   formatRupiah,
@@ -23,6 +24,7 @@ import {
 interface SalesDashboardViewProps {
   orders: OrderRecord[];
   products: ProductItem[];
+  categories: CategoryItem[];
   storeSettings: StoreBrandingSettings;
   onOpenPdfReport: () => void;
 }
@@ -85,6 +87,7 @@ function parseOrderDateInfo(createdAt: string, fallbackIndex = 0) {
 export const SalesDashboardView: React.FC<SalesDashboardViewProps> = ({
   orders,
   products,
+  categories,
   storeSettings,
   onOpenPdfReport,
 }) => {
@@ -363,15 +366,47 @@ export const SalesDashboardView: React.FC<SalesDashboardViewProps> = ({
     return `${smoothLinePath} L ${last.svgX.toFixed(1)} 300 L ${first.svgX.toFixed(1)} 300 Z`;
   }, [smoothLinePath, normalizedPoints]);
 
-  // Category Breakdown in Rupiah (O(N) with O(1) Map lookup)
+  // Category Breakdown in Rupiah — 100% synchronized with user-inputted categories
   const categoryStats = useMemo(() => {
-    const map: Record<string, { label: string; amount: number }> = {
-      burger: { label: t.catBurger, amount: 0 },
-      coffee: { label: t.catCoffee, amount: 0 },
-      pizza: { label: t.catPizza, amount: 0 },
-      snack: { label: t.catSnack, amount: 0 },
-      soft_drink: { label: t.catSoftDrink, amount: 0 },
-      ice_cream: { label: t.catIceCream, amount: 0 },
+    const nonHotCategories = categories.filter(
+      (c) =>
+        c.id.toLowerCase() !== 'hot' &&
+        c.name.trim().toLowerCase() !== 'populer' &&
+        c.name.trim().toLowerCase() !== 'popular'
+    );
+    const activeCategories =
+      nonHotCategories.length > 0 ? nonHotCategories : categories;
+
+    const map: Record<string, { label: string; amount: number }> = {};
+    for (let i = 0; i < activeCategories.length; i++) {
+      const cat = activeCategories[i];
+      map[cat.id] = {
+        label: isId ? cat.name : cat.nameEn || cat.name,
+        amount: 0,
+      };
+    }
+
+    const matchCategoryForProduct = (prod?: ProductItem): string | null => {
+      if (activeCategories.length === 0) return null;
+      if (prod && Array.isArray(prod.categories)) {
+        const candidateCats = prod.categories.filter(
+          (c) => c.toLowerCase() !== 'hot'
+        );
+        const searchList =
+          candidateCats.length > 0 ? candidateCats : prod.categories;
+
+        for (let k = 0; k < searchList.length; k++) {
+          const rawLower = searchList[k].trim().toLowerCase();
+          const matched = activeCategories.find(
+            (c) =>
+              c.id.trim().toLowerCase() === rawLower ||
+              c.name.trim().toLowerCase() === rawLower ||
+              (c.nameEn && c.nameEn.trim().toLowerCase() === rawLower)
+          );
+          if (matched) return matched.id;
+        }
+      }
+      return activeCategories[0].id;
     };
 
     for (let i = 0; i < orders.length; i++) {
@@ -381,30 +416,34 @@ export const SalesDashboardView: React.FC<SalesDashboardViewProps> = ({
         const prod =
           productLookup.byId.get(it.id) ||
           productLookup.byName.get(it.name.toLowerCase());
-        const cat =
-          prod?.categories.find((c) => c !== 'hot') || 'burger';
-        if (!map[cat]) {
-          map[cat] = { label: cat, amount: 0 };
+        const targetCatId = matchCategoryForProduct(prod);
+        if (targetCatId && map[targetCatId]) {
+          map[targetCatId].amount += it.subtotal;
         }
-        map[cat].amount += it.subtotal;
       }
     }
 
     const totalSoldItemsAmount =
       Object.values(map).reduce((s, v) => s + v.amount, 0) || 0;
 
-    return Object.entries(map)
-      .map(([id, val]) => ({
-        id,
-        label: val.label,
-        amount: val.amount,
-        pct:
-          totalSoldItemsAmount > 0
-            ? Math.round((val.amount / totalSoldItemsAmount) * 100)
-            : 0,
-      }))
+    return activeCategories
+      .map((cat) => {
+        const val = map[cat.id] || {
+          label: isId ? cat.name : cat.nameEn || cat.name,
+          amount: 0,
+        };
+        return {
+          id: cat.id,
+          label: val.label,
+          amount: val.amount,
+          pct:
+            totalSoldItemsAmount > 0
+              ? Math.round((val.amount / totalSoldItemsAmount) * 100)
+              : 0,
+        };
+      })
       .sort((a, b) => b.amount - a.amount);
-  }, [orders, productLookup, t]);
+  }, [orders, productLookup, categories, isId]);
 
   // Top Selling Products in Rupiah (O(N) with O(1) Map lookup)
   const topProducts = useMemo(() => {

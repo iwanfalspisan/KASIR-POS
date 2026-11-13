@@ -23,6 +23,7 @@ import {
   FolderPlus,
   Image as ImageIcon,
   Layers,
+  Loader2,
   PackagePlus,
   Pencil,
   Plus,
@@ -68,7 +69,12 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
   const [prodName, setProdName] = useState('');
   const [prodBarcode, setProdBarcode] = useState('');
   const [prodPrice, setProdPrice] = useState('35000');
-  const [prodCategory, setProdCategory] = useState<CategoryId>('burger');
+  const [prodCategory, setProdCategory] = useState<CategoryId>(
+    () =>
+      categories.find((c) => c.id.toLowerCase() !== 'hot')?.id ||
+      categories[0]?.id ||
+      'hot'
+  );
   const [prodStock, setProdStock] = useState('20');
   const [prodThreshold, setProdThreshold] = useState('5');
   const [prodIsNew, setProdIsNew] = useState(true);
@@ -79,10 +85,13 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
     mime: string;
   } | null>(null);
   const [isSavingProd, setIsSavingProd] = useState(false);
+  const [deletingProdId, setDeletingProdId] = useState<string | null>(null);
 
   // Category Form State (Icon-free!)
   const [editingCatId, setEditingCatId] = useState<string | null>(null);
   const [catName, setCatName] = useState('');
+  const [isSavingCat, setIsSavingCat] = useState(false);
+  const [busyCatId, setBusyCatId] = useState<string | null>(null);
 
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -123,9 +132,9 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
     setProdBarcode(generateNextBarcode());
     setProdPrice('35000');
     setProdCategory(
-      categories.find((c) => c.id !== 'hot')?.id ||
+      categories.find((c) => c.id.toLowerCase() !== 'hot')?.id ||
         categories[0]?.id ||
-        'burger'
+        'hot'
     );
     setProdStock('20');
     setProdThreshold('5');
@@ -140,11 +149,20 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
     setProdName(prod.name);
     setProdBarcode(prod.barcode || generateNextBarcode());
     setProdPrice(String(Math.round(prod.price)));
-    const mainCat =
-      prod.categories.find((c) => c !== 'hot') ||
-      prod.categories[0] ||
-      'burger';
-    setProdCategory(mainCat);
+    const rawCats = prod.categories.filter((c) => c.toLowerCase() !== 'hot');
+    const candidateRaw = rawCats[0] || prod.categories[0] || '';
+    const matchedCat = categories.find(
+      (c) =>
+        c.id.toLowerCase() === candidateRaw.toLowerCase() ||
+        c.name.toLowerCase() === candidateRaw.toLowerCase() ||
+        (c.nameEn && c.nameEn.toLowerCase() === candidateRaw.toLowerCase())
+    );
+    setProdCategory(
+      matchedCat?.id ||
+        categories.find((c) => c.id.toLowerCase() !== 'hot')?.id ||
+        categories[0]?.id ||
+        candidateRaw
+    );
     setProdStock(String(prod.stock ?? 20));
     setProdThreshold(String(prod.lowStockThreshold ?? 5));
     setProdIsNew(Boolean(prod.isNew));
@@ -202,7 +220,10 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
         lowStockThreshold: Math.max(0, Math.round(Number(prodThreshold) || 0)),
       };
 
-      await onUpsertProduct(payload, uploadedFile || undefined);
+      await Promise.all([
+        onUpsertProduct(payload, uploadedFile || undefined),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
       setShowProductForm(false);
       setEditingProductId(null);
     } finally {
@@ -210,39 +231,62 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
     }
   };
 
+  const handleDeleteProductClick = async (productId: string) => {
+    if (deletingProdId) return;
+    setDeletingProdId(productId);
+    try {
+      await Promise.all([
+        onDeleteProduct(productId),
+        new Promise((r) => setTimeout(r, 400)),
+      ]);
+    } finally {
+      setDeletingProdId(null);
+    }
+  };
+
   // Category Management Handlers (Icon-Free)
   const handleSaveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!catName.trim()) return;
-
-    if (editingCatId) {
-      const updated = categories.map((c) =>
-        c.id === editingCatId
-          ? {
-              ...c,
-              name: catName.trim(),
-              nameEn: catName.trim(),
-            }
-          : c
-      );
-      await onUpdateCategories(updated);
-      setEditingCatId(null);
-    } else {
-      const slug =
-        catName
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '_') +
-        '_' +
-        Date.now().toString().slice(-3);
-      const newCat: CategoryItem = {
-        id: slug,
-        name: catName.trim(),
-        nameEn: catName.trim(),
-      };
-      await onUpdateCategories([...categories, newCat]);
+    if (!catName.trim() || isSavingCat) return;
+    setIsSavingCat(true);
+    try {
+      if (editingCatId) {
+        const updated = categories.map((c) =>
+          c.id === editingCatId
+            ? {
+                ...c,
+                name: catName.trim(),
+                nameEn: catName.trim(),
+              }
+            : c
+        );
+        await Promise.all([
+          onUpdateCategories(updated),
+          new Promise((r) => setTimeout(r, 400)),
+        ]);
+        setEditingCatId(null);
+      } else {
+        const slug =
+          catName
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_') +
+          '_' +
+          Date.now().toString().slice(-3);
+        const newCat: CategoryItem = {
+          id: slug,
+          name: catName.trim(),
+          nameEn: catName.trim(),
+        };
+        await Promise.all([
+          onUpdateCategories([...categories, newCat]),
+          new Promise((r) => setTimeout(r, 400)),
+        ]);
+      }
+      setCatName('');
+    } finally {
+      setIsSavingCat(false);
     }
-    setCatName('');
   };
 
   const handleStartEditCategory = (cat: CategoryItem) => {
@@ -251,18 +295,35 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
   };
 
   const handleDeleteCategory = async (catId: string) => {
-    if (categories.length <= 1) return;
-    const updated = categories.filter((c) => c.id !== catId);
-    await onUpdateCategories(updated);
+    if (categories.length <= 1 || busyCatId) return;
+    setBusyCatId(catId);
+    try {
+      const updated = categories.filter((c) => c.id !== catId);
+      await Promise.all([
+        onUpdateCategories(updated),
+        new Promise((r) => setTimeout(r, 400)),
+      ]);
+    } finally {
+      setBusyCatId(null);
+    }
   };
 
   const handleMoveCategoryOrder = async (index: number, direction: -1 | 1) => {
     const targetIdx = index + direction;
-    if (targetIdx < 0 || targetIdx >= categories.length) return;
-    const reordered = [...categories];
-    const [moved] = reordered.splice(index, 1);
-    reordered.splice(targetIdx, 0, moved);
-    await onUpdateCategories(reordered);
+    if (targetIdx < 0 || targetIdx >= categories.length || busyCatId) return;
+    const targetCat = categories[index];
+    setBusyCatId(targetCat.id);
+    try {
+      const reordered = [...categories];
+      const [moved] = reordered.splice(index, 1);
+      reordered.splice(targetIdx, 0, moved);
+      await Promise.all([
+        onUpdateCategories(reordered),
+        new Promise((r) => setTimeout(r, 350)),
+      ]);
+    } finally {
+      setBusyCatId(null);
+    }
   };
 
   // Horizontal Category Filter Bar Slider Refs & State
@@ -580,12 +641,18 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
                     type="submit"
                     disabled={isSavingProd}
                     style={{ backgroundColor: primaryColor }}
-                    className="px-6 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 flex items-center gap-1.5 cursor-pointer"
+                    className="px-6 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 disabled:opacity-75 flex items-center gap-2 cursor-pointer"
                   >
-                    <Check className="w-4 h-4" />
+                    {isSavingProd ? (
+                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    ) : (
+                      <Check className="w-4 h-4 shrink-0" />
+                    )}
                     <span>
                       {isSavingProd
-                        ? 'Menyimpan...'
+                        ? isId
+                          ? 'Menyimpan...'
+                          : 'Saving...'
                         : editingProductId
                         ? isId
                           ? 'Simpan Perubahan Menu'
@@ -826,11 +893,16 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => onDeleteProduct(prod.id)}
-                      className="p-2 sm:p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 transition-colors cursor-pointer"
+                      disabled={deletingProdId === prod.id}
+                      onClick={() => handleDeleteProductClick(prod.id)}
+                      className="p-2 sm:p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-60 text-rose-600 transition-colors cursor-pointer"
                       title={t.deleteMenuBtn}
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      {deletingProdId === prod.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
                     </button>
                   </div>
                 </div>
@@ -897,12 +969,21 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
 
             <button
               type="submit"
+              disabled={isSavingCat}
               style={{ backgroundColor: primaryColor }}
-              className="w-full py-3 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 flex items-center justify-center gap-2 cursor-pointer"
+              className="w-full py-3 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 disabled:opacity-75 flex items-center justify-center gap-2 cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
+              {isSavingCat ? (
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              ) : (
+                <Plus className="w-4 h-4 shrink-0" />
+              )}
               <span>
-                {editingCatId
+                {isSavingCat
+                  ? isId
+                    ? 'Menyimpan Kategori...'
+                    : 'Saving Category...'
+                  : editingCatId
                   ? isId
                     ? 'Simpan Perubahan Kategori'
                     : 'Update Category'
@@ -944,7 +1025,7 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         type="button"
-                        disabled={idx === 0}
+                        disabled={idx === 0 || busyCatId === cat.id}
                         onClick={() => handleMoveCategoryOrder(idx, -1)}
                         className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors cursor-pointer"
                         title={isId ? 'Geser Urutan ke Kiri / Atas' : 'Move Left / Up'}
@@ -953,7 +1034,9 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
                       </button>
                       <button
                         type="button"
-                        disabled={idx === categories.length - 1}
+                        disabled={
+                          idx === categories.length - 1 || busyCatId === cat.id
+                        }
                         onClick={() => handleMoveCategoryOrder(idx, 1)}
                         className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors cursor-pointer"
                         title={isId ? 'Geser Urutan ke Kanan / Bawah' : 'Move Right / Down'}
@@ -971,11 +1054,16 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
                       {cat.id !== 'hot' && categories.length > 1 && (
                         <button
                           type="button"
+                          disabled={busyCatId === cat.id}
                           onClick={() => handleDeleteCategory(cat.id)}
-                          className="p-2 rounded-xl bg-white hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                          className="p-2 rounded-xl bg-white hover:bg-rose-50 disabled:opacity-60 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
                           title="Hapus"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          {busyCatId === cat.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-600" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
                         </button>
                       )}
                     </div>

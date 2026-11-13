@@ -764,16 +764,29 @@ export const PdfReportModal: React.FC<PdfReportModalProps> = ({
     </thead>
     <tbody>
       ${products
-        .map(
-          (p, i) => `
+        .map((p, i) => {
+          const nonHot = p.categories.filter((c) => c.toLowerCase() !== 'hot');
+          const rawList = nonHot.length > 0 ? nonHot : p.categories;
+          const displayCats = rawList
+            .map((raw) => {
+              const found = categories.find(
+                (c) =>
+                  c.id.toLowerCase() === raw.toLowerCase() ||
+                  c.name.toLowerCase() === raw.toLowerCase() ||
+                  (c.nameEn && c.nameEn.toLowerCase() === raw.toLowerCase())
+              );
+              return found ? (isId ? found.name : found.nameEn || found.name) : raw;
+            })
+            .join(', ');
+          return `
         <tr>
           <td>${i + 1}</td>
           <td>${p.name}</td>
-          <td>${p.categories.join(', ')}</td>
+          <td>${displayCats}</td>
           <td class="right">${formatRupiah(p.price)}</td>
         </tr>
-      `
-        )
+      `;
+        })
         .join('')}
     </tbody>
   </table>

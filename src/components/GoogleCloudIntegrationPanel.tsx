@@ -23,6 +23,7 @@ import {
   Image as ImageIcon,
   KeyRound,
   Link2,
+  Loader2,
   Lock,
   Palette,
   Percent,
@@ -133,6 +134,10 @@ export const GoogleCloudIntegrationPanel: React.FC<
   const [showLoginPass, setShowLoginPass] = useState<boolean>(false);
   const [loginAccountSaved, setLoginAccountSaved] = useState<boolean>(false);
   const [loginAccountError, setLoginAccountError] = useState<string>('');
+  const [isSavingBranding, setIsSavingBranding] = useState<boolean>(false);
+  const [isSavingTax, setIsSavingTax] = useState<boolean>(false);
+  const [isSavingLogin, setIsSavingLogin] = useState<boolean>(false);
+  const [isSavingConfig, setIsSavingConfig] = useState<boolean>(false);
 
   // Keep form fields synced if storeSettings updates from 2-way database sync
   React.useEffect(() => {
@@ -151,19 +156,28 @@ export const GoogleCloudIntegrationPanel: React.FC<
 
   const handleSaveBranding = async (e: React.FormEvent) => {
     e.preventDefault();
-    const updated: StoreBrandingSettings = {
-      ...storeSettings,
-      storeName: storeName.trim() || 'PinkPOS Resto',
-      storeTagline: storeTagline.trim(),
-      logoType,
-      customLogoUrl: uploadedLogoFile
-        ? uploadedLogoFile.data
-        : customLogoUrl.trim(),
-      primaryColor: selectedColor,
-    };
-    await onUpdateStoreSettings(updated, uploadedLogoFile || undefined);
-    setBrandingSaved(true);
-    setTimeout(() => setBrandingSaved(false), 3000);
+    if (isSavingBranding) return;
+    setIsSavingBranding(true);
+    try {
+      const updated: StoreBrandingSettings = {
+        ...storeSettings,
+        storeName: storeName.trim() || 'PinkPOS Resto',
+        storeTagline: storeTagline.trim(),
+        logoType,
+        customLogoUrl: uploadedLogoFile
+          ? uploadedLogoFile.data
+          : customLogoUrl.trim(),
+        primaryColor: selectedColor,
+      };
+      await Promise.all([
+        onUpdateStoreSettings(updated, uploadedLogoFile || undefined),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+      setBrandingSaved(true);
+      setTimeout(() => setBrandingSaved(false), 3000);
+    } finally {
+      setIsSavingBranding(false);
+    }
   };
 
   const handleSelectColor = (hex: string) => {
@@ -199,20 +213,30 @@ export const GoogleCloudIntegrationPanel: React.FC<
 
   const handleSaveTaxSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    const parsedRate = Math.max(0, Math.min(100, Number(taxRate) || 0));
-    const updated: StoreBrandingSettings = {
-      ...storeSettings,
-      taxEnabled,
-      taxName: taxName.trim() || 'PBF',
-      taxRate: parsedRate,
-    };
-    await onUpdateStoreSettings(updated);
-    setTaxSaved(true);
-    setTimeout(() => setTaxSaved(false), 3000);
+    if (isSavingTax) return;
+    setIsSavingTax(true);
+    try {
+      const parsedRate = Math.max(0, Math.min(100, Number(taxRate) || 0));
+      const updated: StoreBrandingSettings = {
+        ...storeSettings,
+        taxEnabled,
+        taxName: taxName.trim() || 'PBF',
+        taxRate: parsedRate,
+      };
+      await Promise.all([
+        onUpdateStoreSettings(updated),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+      setTaxSaved(true);
+      setTimeout(() => setTaxSaved(false), 3000);
+    } finally {
+      setIsSavingTax(false);
+    }
   };
 
   const handleSaveLoginAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingLogin) return;
     if (!loginUsername.trim() || !loginPassword.trim()) {
       setLoginAccountError(
         isId
@@ -226,27 +250,42 @@ export const GoogleCloudIntegrationPanel: React.FC<
       return;
     }
     setLoginAccountError('');
-    const updated: StoreBrandingSettings = {
-      ...storeSettings,
-      loginUsername: loginUsername.trim(),
-      loginPassword: loginPassword.trim(),
-    };
-    await onUpdateStoreSettings(updated);
-    setLoginAccountSaved(true);
-    setTimeout(() => setLoginAccountSaved(false), 3000);
+    setIsSavingLogin(true);
+    try {
+      const updated: StoreBrandingSettings = {
+        ...storeSettings,
+        loginUsername: loginUsername.trim(),
+        loginPassword: loginPassword.trim(),
+      };
+      await Promise.all([
+        onUpdateStoreSettings(updated),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+      setLoginAccountSaved(true);
+      setTimeout(() => setLoginAccountSaved(false), 3000);
+    } finally {
+      setIsSavingLogin(false);
+    }
   };
 
-  const handleSavePermanentConfig = (e: React.FormEvent) => {
+  const handleSavePermanentConfig = async (e: React.FormEvent) => {
     e.preventDefault();
-    onUpdateConfig({
-      ...config,
-      APPS_SCRIPT_URL: appsScriptUrl.trim(),
-      GOOGLE_SHEET_URL: googleSheetUrl.trim(),
-      GOOGLE_DRIVE_FOLDER_URL: googleDriveUrl.trim(),
-      LAST_SYNCED: new Date().toLocaleTimeString(),
-    });
-    setSavedBanner(true);
-    setTimeout(() => setSavedBanner(false), 3000);
+    if (isSavingConfig) return;
+    setIsSavingConfig(true);
+    try {
+      onUpdateConfig({
+        ...config,
+        APPS_SCRIPT_URL: appsScriptUrl.trim(),
+        GOOGLE_SHEET_URL: googleSheetUrl.trim(),
+        GOOGLE_DRIVE_FOLDER_URL: googleDriveUrl.trim(),
+        LAST_SYNCED: new Date().toLocaleTimeString(),
+      });
+      await new Promise((r) => setTimeout(r, 450));
+      setSavedBanner(true);
+      setTimeout(() => setSavedBanner(false), 3000);
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
   const copyText = (key: string, value: string) => {
@@ -473,11 +512,21 @@ export const GoogleCloudIntegrationPanel: React.FC<
               </span>
               <button
                 type="submit"
+                disabled={isSavingBranding}
                 style={{ backgroundColor: selectedColor }}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 transition-all cursor-pointer"
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 disabled:opacity-65 transition-all cursor-pointer"
               >
-                <Save className="w-4 h-4" />
-                {t.saveBrandingBtn}
+                {isSavingBranding ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{isId ? 'Menyimpan...' : 'Saving...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    <span>{t.saveBrandingBtn}</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -588,11 +637,21 @@ export const GoogleCloudIntegrationPanel: React.FC<
           <div className="md:col-span-3 flex flex-col items-end justify-end gap-2">
             <button
               type="submit"
+              disabled={isSavingTax}
               style={{ backgroundColor: primaryColor }}
-              className="w-full py-2.5 px-4 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 flex items-center justify-center gap-2 transition-all cursor-pointer"
+              className="w-full py-2.5 px-4 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 disabled:opacity-65 flex items-center justify-center gap-2 transition-all cursor-pointer"
             >
-              <Save className="w-4 h-4" />
-              <span>{t.saveTaxBtn}</span>
+              {isSavingTax ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>{isId ? 'Menyimpan...' : 'Saving...'}</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>{t.saveTaxBtn}</span>
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -761,11 +820,21 @@ export const GoogleCloudIntegrationPanel: React.FC<
 
           <button
             type="submit"
+            disabled={isSavingLogin}
             style={{ backgroundColor: primaryColor }}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 transition-all cursor-pointer"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-md hover:opacity-95 disabled:opacity-65 transition-all cursor-pointer"
           >
-            <Save className="w-4 h-4" />
-            <span>{t.saveLoginAccountBtn}</span>
+            {isSavingLogin ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>{isId ? 'Menyimpan...' : 'Saving...'}</span>
+              </>
+            ) : (
+              <>
+                <Save className="w-4 h-4" />
+                <span>{t.saveLoginAccountBtn}</span>
+              </>
+            )}
           </button>
         </div>
       </form>
@@ -1030,10 +1099,20 @@ export const GoogleCloudIntegrationPanel: React.FC<
           </div>
           <button
             type="submit"
-            className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#2D3748] hover:bg-slate-800 text-white text-xs font-semibold transition-all cursor-pointer"
+            disabled={isSavingConfig}
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#2D3748] hover:bg-slate-800 disabled:opacity-65 text-white text-xs font-semibold transition-all cursor-pointer"
           >
-            <Save className="w-4 h-4" />
-            {isId ? 'Simpan Link' : 'Save Links'}
+            {isSavingConfig ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>{isId ? 'Menyimpan...' : 'Saving...'}</span>
+              </>
+            ) : (
+              <>
+                <Save className="w-4 h-4" />
+                <span>{isId ? 'Simpan Link' : 'Save Links'}</span>
+              </>
+            )}
           </button>
         </div>
       </form>

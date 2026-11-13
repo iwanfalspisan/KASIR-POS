@@ -14,6 +14,7 @@ import {
   FileText,
   Globe,
   Home,
+  Loader2,
   LogOut,
   Maximize2,
   Minimize2,
@@ -132,6 +133,13 @@ export default function App() {
   const [receiptOrderToPrint, setReceiptOrderToPrint] =
     useState<OrderRecord | null>(null);
   const [isPdfReportOpen, setIsPdfReportOpen] = useState<boolean>(false);
+
+  // Global & Action Spinning Loading States
+  const [actionLoadingText, setActionLoadingText] = useState<string | null>(
+    null
+  );
+  const [isChargingOrder, setIsChargingOrder] = useState<boolean>(false);
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null);
 
   // Store Branding & Tax Settings (Logo, Store Name, App Primary Color, Language, Tax)
   const [storeSettings, setStoreSettings] = useState<StoreBrandingSettings>(
@@ -1130,74 +1138,96 @@ export default function App() {
     newSettings: StoreBrandingSettings,
     logoUpload?: { data: string; name: string; mime: string }
   ) => {
-    lastMutationAtRef.current = Date.now();
-    setStoreSettings(newSettings);
-    latestStateRef.current.storeSettings = newSettings;
+    setActionLoadingText(
+      isId ? 'Menyimpan perubahan pengaturan...' : 'Saving settings...'
+    );
     try {
-      localStorage.setItem(
-        'pinkpos_store_branding',
-        JSON.stringify(newSettings)
-      );
-    } catch {
-      // ignore
-    }
-    broadcastStateChange('SETTINGS_UPDATED', newSettings);
-    if (newSettings.loginUsername) {
-      const displayUser = newSettings.loginUsername.includes('@')
-        ? newSettings.loginUsername.split('@')[0]
-        : newSettings.loginUsername;
-      setCashierName(displayUser);
-    }
-    const resp = await pushToCloudDatabase({
-      action: 'saveStoreSettings',
-      settings: newSettings,
-      logoBase64: logoUpload?.data,
-      logoFileName: logoUpload?.name,
-      logoMimeType: logoUpload?.mime,
-    });
-    if (
-      resp &&
-      typeof resp.customLogoUrl === 'string' &&
-      resp.customLogoUrl
-    ) {
-      const withDriveLogo: StoreBrandingSettings = {
-        ...newSettings,
-        customLogoUrl: resp.customLogoUrl,
-      };
-      setStoreSettings(withDriveLogo);
-      latestStateRef.current.storeSettings = withDriveLogo;
-      broadcastStateChange('SETTINGS_UPDATED', withDriveLogo);
+      lastMutationAtRef.current = Date.now();
+      setStoreSettings(newSettings);
+      latestStateRef.current.storeSettings = newSettings;
+      try {
+        localStorage.setItem(
+          'pinkpos_store_branding',
+          JSON.stringify(newSettings)
+        );
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('SETTINGS_UPDATED', newSettings);
+      if (newSettings.loginUsername) {
+        const displayUser = newSettings.loginUsername.includes('@')
+          ? newSettings.loginUsername.split('@')[0]
+          : newSettings.loginUsername;
+        setCashierName(displayUser);
+      }
+      const [resp] = await Promise.all([
+        pushToCloudDatabase({
+          action: 'saveStoreSettings',
+          settings: newSettings,
+          logoBase64: logoUpload?.data,
+          logoFileName: logoUpload?.name,
+          logoMimeType: logoUpload?.mime,
+        }),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+      if (
+        resp &&
+        typeof resp.customLogoUrl === 'string' &&
+        resp.customLogoUrl
+      ) {
+        const withDriveLogo: StoreBrandingSettings = {
+          ...newSettings,
+          customLogoUrl: resp.customLogoUrl,
+        };
+        setStoreSettings(withDriveLogo);
+        latestStateRef.current.storeSettings = withDriveLogo;
+        broadcastStateChange('SETTINGS_UPDATED', withDriveLogo);
+      }
+    } finally {
+      setActionLoadingText(null);
     }
   };
 
   // Update Dynamic Categories
   const handleUpdateCategories = async (newCategories: CategoryItem[]) => {
-    lastMutationAtRef.current = Date.now();
-    setCategories(newCategories);
-    latestStateRef.current.categories = newCategories;
+    setActionLoadingText(
+      isId ? 'Menyimpan perubahan kategori...' : 'Saving categories...'
+    );
     try {
-      localStorage.setItem(
-        'pinkpos_categories_list',
-        JSON.stringify(newCategories)
-      );
-    } catch {
-      // ignore
+      lastMutationAtRef.current = Date.now();
+      setCategories(newCategories);
+      latestStateRef.current.categories = newCategories;
+      try {
+        localStorage.setItem(
+          'pinkpos_categories_list',
+          JSON.stringify(newCategories)
+        );
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('CATEGORIES_UPDATED', newCategories);
+      if (!newCategories.some((c) => c.id === activeCategory)) {
+        setActiveCategory(newCategories[0]?.id || 'hot');
+      }
+      await Promise.all([
+        (async () => {
+          await pushToCloudDatabase({
+            action: 'saveCategories',
+            categories: newCategories,
+          });
+          await pushToCloudDatabase({
+            action: 'syncAll',
+            products: latestStateRef.current.products,
+            orders: latestStateRef.current.orders,
+            categories: newCategories,
+            storeSettings: latestStateRef.current.storeSettings,
+          });
+        })(),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+    } finally {
+      setActionLoadingText(null);
     }
-    broadcastStateChange('CATEGORIES_UPDATED', newCategories);
-    if (!newCategories.some((c) => c.id === activeCategory)) {
-      setActiveCategory(newCategories[0]?.id || 'hot');
-    }
-    await pushToCloudDatabase({
-      action: 'saveCategories',
-      categories: newCategories,
-    });
-    await pushToCloudDatabase({
-      action: 'syncAll',
-      products: latestStateRef.current.products,
-      orders: latestStateRef.current.orders,
-      categories: newCategories,
-      storeSettings: latestStateRef.current.storeSettings,
-    });
   };
 
   // Upsert (Add or Edit) Product
@@ -1205,142 +1235,189 @@ export default function App() {
     productPayload: ProductItem,
     base64Image?: { data: string; name: string; mime: string }
   ) => {
-    lastMutationAtRef.current = Date.now();
     const currentProducts = latestStateRef.current.products;
     const exists = currentProducts.some((p) => p.id === productPayload.id);
-    const updatedProducts = exists
-      ? currentProducts.map((p) =>
-          p.id === productPayload.id ? productPayload : p
-        )
-      : [productPayload, ...currentProducts];
-
-    setProducts(updatedProducts);
-    latestStateRef.current.products = updatedProducts;
-    try {
-      localStorage.setItem(
-        'pinkpos_products_catalog_idr',
-        JSON.stringify(updatedProducts)
-      );
-    } catch {
-      // ignore
-    }
-    broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
-
-    setCart((prev) =>
-      prev.map((c) =>
-        c.product.id === productPayload.id
-          ? { ...c, product: productPayload }
-          : c
-      )
+    setActionLoadingText(
+      exists
+        ? isId
+          ? `Menyimpan perubahan "${productPayload.name}"...`
+          : `Saving changes to "${productPayload.name}"...`
+        : isId
+        ? `Menambahkan produk "${productPayload.name}"...`
+        : `Adding product "${productPayload.name}"...`
     );
+    try {
+      lastMutationAtRef.current = Date.now();
+      const updatedProducts = exists
+        ? currentProducts.map((p) =>
+            p.id === productPayload.id ? productPayload : p
+          )
+        : [productPayload, ...currentProducts];
 
-    const resp = await pushToCloudDatabase({
-      action: 'upsertProduct',
-      ...productPayload,
-      allProducts: updatedProducts,
-      base64Data: base64Image?.data,
-      fileName: base64Image?.name,
-      mimeType: base64Image?.mime,
-    });
-
-    let finalProducts = updatedProducts;
-    if (resp && typeof resp.imageUrl === 'string' && resp.imageUrl) {
-      const driveSyncedProduct: ProductItem = {
-        ...productPayload,
-        imageUrl: resp.imageUrl,
-        driveFileId:
-          typeof resp.driveFileId === 'string'
-            ? resp.driveFileId
-            : productPayload.driveFileId,
-      };
-      finalProducts = updatedProducts.map((p) =>
-        p.id === driveSyncedProduct.id ? driveSyncedProduct : p
-      );
-      setProducts(finalProducts);
-      latestStateRef.current.products = finalProducts;
+      setProducts(updatedProducts);
+      latestStateRef.current.products = updatedProducts;
       try {
         localStorage.setItem(
           'pinkpos_products_catalog_idr',
-          JSON.stringify(finalProducts)
+          JSON.stringify(updatedProducts)
         );
       } catch {
         // ignore
       }
-      broadcastStateChange('PRODUCTS_UPDATED', finalProducts);
-    }
+      broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
 
-    // Ensure full table sync in Google Sheets even on legacy Code.gs deployments
-    await pushToCloudDatabase({
-      action: 'syncAll',
-      products: finalProducts,
-      orders: latestStateRef.current.orders,
-      categories: latestStateRef.current.categories,
-      storeSettings: latestStateRef.current.storeSettings,
-    });
+      setCart((prev) =>
+        prev.map((c) =>
+          c.product.id === productPayload.id
+            ? { ...c, product: productPayload }
+            : c
+        )
+      );
+
+      const [resp] = await Promise.all([
+        pushToCloudDatabase({
+          action: 'upsertProduct',
+          ...productPayload,
+          allProducts: updatedProducts,
+          base64Data: base64Image?.data,
+          fileName: base64Image?.name,
+          mimeType: base64Image?.mime,
+        }),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+
+      let finalProducts = updatedProducts;
+      if (resp && typeof resp.imageUrl === 'string' && resp.imageUrl) {
+        const driveSyncedProduct: ProductItem = {
+          ...productPayload,
+          imageUrl: resp.imageUrl,
+          driveFileId:
+            typeof resp.driveFileId === 'string'
+              ? resp.driveFileId
+              : productPayload.driveFileId,
+        };
+        finalProducts = updatedProducts.map((p) =>
+          p.id === driveSyncedProduct.id ? driveSyncedProduct : p
+        );
+        setProducts(finalProducts);
+        latestStateRef.current.products = finalProducts;
+        try {
+          localStorage.setItem(
+            'pinkpos_products_catalog_idr',
+            JSON.stringify(finalProducts)
+          );
+        } catch {
+          // ignore
+        }
+        broadcastStateChange('PRODUCTS_UPDATED', finalProducts);
+      }
+
+      // Ensure full table sync in Google Sheets even on legacy Code.gs deployments
+      await pushToCloudDatabase({
+        action: 'syncAll',
+        products: finalProducts,
+        orders: latestStateRef.current.orders,
+        categories: latestStateRef.current.categories,
+        storeSettings: latestStateRef.current.storeSettings,
+      });
+    } finally {
+      setActionLoadingText(null);
+    }
   };
 
   // Delete Product
   const handleDeleteProduct = async (productId: string) => {
-    lastMutationAtRef.current = Date.now();
     const deletedTarget = latestStateRef.current.products.find(
       (p) => p.id === productId
     );
-    const nextProducts = latestStateRef.current.products.filter(
-      (p) => p.id !== productId
+    setActionLoadingText(
+      isId
+        ? `Menghapus produk "${deletedTarget?.name || ''}"...`
+        : `Deleting product "${deletedTarget?.name || ''}"...`
     );
-    setProducts(nextProducts);
-    latestStateRef.current.products = nextProducts;
     try {
-      localStorage.setItem(
-        'pinkpos_products_catalog_idr',
-        JSON.stringify(nextProducts)
+      lastMutationAtRef.current = Date.now();
+      const nextProducts = latestStateRef.current.products.filter(
+        (p) => p.id !== productId
       );
-    } catch {
-      // ignore
-    }
-    broadcastStateChange('PRODUCTS_UPDATED', nextProducts);
-    setCart((prev) => prev.filter((c) => c.product.id !== productId));
+      setProducts(nextProducts);
+      latestStateRef.current.products = nextProducts;
+      try {
+        localStorage.setItem(
+          'pinkpos_products_catalog_idr',
+          JSON.stringify(nextProducts)
+        );
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('PRODUCTS_UPDATED', nextProducts);
+      setCart((prev) => prev.filter((c) => c.product.id !== productId));
 
-    await pushToCloudDatabase({
-      action: 'deleteProduct',
-      id: productId,
-      name: deletedTarget?.name,
-      allProducts: nextProducts,
-    });
-    await pushToCloudDatabase({
-      action: 'syncAll',
-      products: nextProducts,
-      orders: latestStateRef.current.orders,
-      categories: latestStateRef.current.categories,
-      storeSettings: latestStateRef.current.storeSettings,
-    });
+      await Promise.all([
+        (async () => {
+          await pushToCloudDatabase({
+            action: 'deleteProduct',
+            id: productId,
+            name: deletedTarget?.name,
+            allProducts: nextProducts,
+          });
+          await pushToCloudDatabase({
+            action: 'syncAll',
+            products: nextProducts,
+            orders: latestStateRef.current.orders,
+            categories: latestStateRef.current.categories,
+            storeSettings: latestStateRef.current.storeSettings,
+          });
+        })(),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+    } finally {
+      setActionLoadingText(null);
+    }
   };
 
   // Delete / Void Order in Bills
   const handleDeleteOrder = async (orderId: string) => {
-    lastMutationAtRef.current = Date.now();
-    const nextOrders = latestStateRef.current.orders.filter(
-      (o) => o.orderId !== orderId
+    if (deletingOrderId) return;
+    setDeletingOrderId(orderId);
+    setActionLoadingText(
+      isId
+        ? `Menghapus transaksi ${orderId}...`
+        : `Deleting transaction ${orderId}...`
     );
-    setOrders(nextOrders);
-    latestStateRef.current.orders = nextOrders;
     try {
-      localStorage.setItem(
-        'pinkpos_orders_history_idr',
-        JSON.stringify(nextOrders)
+      lastMutationAtRef.current = Date.now();
+      const nextOrders = latestStateRef.current.orders.filter(
+        (o) => o.orderId !== orderId
       );
-    } catch {
-      // ignore
+      setOrders(nextOrders);
+      latestStateRef.current.orders = nextOrders;
+      try {
+        localStorage.setItem(
+          'pinkpos_orders_history_idr',
+          JSON.stringify(nextOrders)
+        );
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('ORDERS_UPDATED', nextOrders);
+      await Promise.all([
+        (async () => {
+          await pushToCloudDatabase({ action: 'deleteOrder', orderId });
+          await pushToCloudDatabase({
+            action: 'syncAll',
+            products: latestStateRef.current.products,
+            orders: nextOrders,
+            categories: latestStateRef.current.categories,
+            storeSettings: latestStateRef.current.storeSettings,
+          });
+        })(),
+        new Promise((r) => setTimeout(r, 450)),
+      ]);
+    } finally {
+      setDeletingOrderId(null);
+      setActionLoadingText(null);
     }
-    broadcastStateChange('ORDERS_UPDATED', nextOrders);
-    await pushToCloudDatabase({ action: 'deleteOrder', orderId });
-    await pushToCloudDatabase({
-      action: 'syncAll',
-      products: latestStateRef.current.products,
-      orders: nextOrders,
-      categories: latestStateRef.current.categories,
-      storeSettings: latestStateRef.current.storeSettings,
-    });
   };
 
   // Filtered and Sorted Products (Supports 'hot'/Populer showing all sheet products + case-insensitive category ID/name matching)
@@ -1438,84 +1515,97 @@ export default function App() {
 
   // Charge Button Handler -> Deducts Stock, Saves Order & Shows Order Success Screen
   const handleChargeOrder = async () => {
-    if (cart.length === 0) return;
+    if (cart.length === 0 || isChargingOrder) return;
+    setIsChargingOrder(true);
+    setActionLoadingText(
+      isId
+        ? 'Memproses pembayaran & menyimpan transaksi...'
+        : 'Processing payment & saving transaction...'
+    );
 
-    const trimmedCustomer = customerName.trim();
-    const paymentMethodMap: Record<
-      'cash' | 'qris' | 'debit' | 'transfer',
-      string
-    > = {
-      cash: t.payCash,
-      qris: t.payQris,
-      debit: t.payCard,
-      transfer: t.payTransfer,
-    };
-    const selectedPaymentLabel = paymentMethodMap[paymentMethod] || t.payCash;
-
-    const newOrder: OrderRecord = {
-      orderId: `ORD-${Math.floor(100000 + Math.random() * 900000)}`,
-      createdAt: new Date().toLocaleString('id-ID'),
-      cashierName,
-      ...(trimmedCustomer ? { customerName: trimmedCustomer } : {}),
-      paymentMethod: selectedPaymentLabel,
-      items: cart.map((item) => ({
-        id: item.product.id,
-        name: item.product.name,
-        price: item.product.price,
-        quantity: item.quantity,
-        subtotal: Math.round(item.product.price * item.quantity),
-      })),
-      subTotal: Math.round(subTotal),
-      taxPbf: Math.round(taxPbf),
-      total: Math.round(totalAmount),
-      syncedToSheet: true,
-    };
-
-    // Deduct stock quantities from purchased products
-    lastMutationAtRef.current = Date.now();
-    const updatedProducts = latestStateRef.current.products.map((prod) => {
-      const orderedItem = cart.find((c) => c.product.id === prod.id);
-      if (!orderedItem) return prod;
-      return {
-        ...prod,
-        stock: Math.max(0, (prod.stock ?? 20) - orderedItem.quantity),
-      };
-    });
-    const updatedOrders = [newOrder, ...latestStateRef.current.orders];
-
-    setProducts(updatedProducts);
-    setOrders(updatedOrders);
-    latestStateRef.current.products = updatedProducts;
-    latestStateRef.current.orders = updatedOrders;
     try {
-      localStorage.setItem(
-        'pinkpos_products_catalog_idr',
-        JSON.stringify(updatedProducts)
-      );
-      localStorage.setItem(
-        'pinkpos_orders_history_idr',
-        JSON.stringify(updatedOrders)
-      );
-    } catch {
-      // ignore
+      const trimmedCustomer = customerName.trim();
+      const paymentMethodMap: Record<
+        'cash' | 'qris' | 'debit' | 'transfer',
+        string
+      > = {
+        cash: t.payCash,
+        qris: t.payQris,
+        debit: t.payCard,
+        transfer: t.payTransfer,
+      };
+      const selectedPaymentLabel = paymentMethodMap[paymentMethod] || t.payCash;
+
+      const newOrder: OrderRecord = {
+        orderId: `ORD-${Math.floor(100000 + Math.random() * 900000)}`,
+        createdAt: new Date().toLocaleString('id-ID'),
+        cashierName,
+        ...(trimmedCustomer ? { customerName: trimmedCustomer } : {}),
+        paymentMethod: selectedPaymentLabel,
+        items: cart.map((item) => ({
+          id: item.product.id,
+          name: item.product.name,
+          price: item.product.price,
+          quantity: item.quantity,
+          subtotal: Math.round(item.product.price * item.quantity),
+        })),
+        subTotal: Math.round(subTotal),
+        taxPbf: Math.round(taxPbf),
+        total: Math.round(totalAmount),
+        syncedToSheet: true,
+      };
+
+      // Deduct stock quantities from purchased products
+      lastMutationAtRef.current = Date.now();
+      const updatedProducts = latestStateRef.current.products.map((prod) => {
+        const orderedItem = cart.find((c) => c.product.id === prod.id);
+        if (!orderedItem) return prod;
+        return {
+          ...prod,
+          stock: Math.max(0, (prod.stock ?? 20) - orderedItem.quantity),
+        };
+      });
+      const updatedOrders = [newOrder, ...latestStateRef.current.orders];
+
+      setProducts(updatedProducts);
+      setOrders(updatedOrders);
+      latestStateRef.current.products = updatedProducts;
+      latestStateRef.current.orders = updatedOrders;
+      try {
+        localStorage.setItem(
+          'pinkpos_products_catalog_idr',
+          JSON.stringify(updatedProducts)
+        );
+        localStorage.setItem(
+          'pinkpos_orders_history_idr',
+          JSON.stringify(updatedOrders)
+        );
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
+      broadcastStateChange('ORDERS_UPDATED', updatedOrders);
+
+      await new Promise((r) => setTimeout(r, 420));
+
+      setLastCompletedOrder(newOrder);
+      setOrderSuccess(true);
+      setMobileFullscreenCartOpen(false);
+      setCart([]);
+      setCustomerName('');
+
+      // Immediately print thermal receipt upon clicking 'Bayar'
+      printThermalReceiptNow(newOrder, storeSettings, cashierName, '80mm');
+
+      await pushToCloudDatabase({
+        action: 'saveOrder',
+        ...newOrder,
+        allProducts: updatedProducts,
+      });
+    } finally {
+      setIsChargingOrder(false);
+      setActionLoadingText(null);
     }
-    broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
-    broadcastStateChange('ORDERS_UPDATED', updatedOrders);
-
-    setLastCompletedOrder(newOrder);
-    setOrderSuccess(true);
-    setMobileFullscreenCartOpen(false);
-    setCart([]);
-    setCustomerName('');
-
-    // Immediately print thermal receipt upon clicking 'Bayar'
-    printThermalReceiptNow(newOrder, storeSettings, cashierName, '80mm');
-
-    await pushToCloudDatabase({
-      action: 'saveOrder',
-      ...newOrder,
-      allProducts: updatedProducts,
-    });
   };
 
   // Order Menu panel ONLY opens for 'home' menu
@@ -1561,6 +1651,17 @@ export default function App() {
            STAGE 3: FRAMED FULL-SCREEN POS WORKSPACE (Responsive across Mobile, Tablet & Desktop)
            ================================================================== */
         <div className="w-full h-full bg-[#F8F9FA] rounded-none sm:rounded-[26px] lg:rounded-[32px] shadow-2xl border-0 sm:border-[5px] lg:border-[6px] border-white flex flex-col md:flex-row overflow-hidden relative animate-stage-transition">
+          {/* Global Spinning Loading Indicator Pill (For Save, Add/Edit/Delete Product, Category, Payment, etc.) */}
+          {actionLoadingText && (
+            <div className="fixed top-4 sm:top-5 left-1/2 -translate-x-1/2 z-[70] px-4 sm:px-5 py-2.5 sm:py-3 rounded-2xl bg-slate-900/95 backdrop-blur-xs text-white shadow-2xl border border-slate-700/80 flex items-center gap-2.5 text-xs sm:text-sm font-bold animate-modal-pop max-w-[92vw]">
+              <Loader2
+                className="w-4 h-4 sm:w-4.5 sm:h-4.5 animate-spin shrink-0"
+                style={{ color: primaryColor }}
+              />
+              <span className="truncate">{actionLoadingText}</span>
+            </div>
+          )}
+
           {/* Floating Barcode Scan Notification Toast */}
           {scanToast && (
             <div
@@ -2443,6 +2544,7 @@ export default function App() {
                       <SalesDashboardView
                         orders={orders}
                         products={products}
+                        categories={categories}
                         storeSettings={storeSettings}
                         onOpenPdfReport={() => setIsPdfReportOpen(true)}
                       />
@@ -2592,13 +2694,18 @@ export default function App() {
                                     {/* Hapus Transaksi Button */}
                                     <button
                                       type="button"
+                                      disabled={deletingOrderId === ord.orderId}
                                       onClick={() =>
                                         handleDeleteOrder(ord.orderId)
                                       }
                                       title={t.deleteBill}
-                                      className="p-2 rounded-xl bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                                      className="p-2 rounded-xl bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 disabled:opacity-60 transition-colors cursor-pointer"
                                     >
-                                      <Trash2 className="w-4 h-4" />
+                                      {deletingOrderId === ord.orderId ? (
+                                        <Loader2 className="w-4 h-4 animate-spin text-rose-600" />
+                                      ) : (
+                                        <Trash2 className="w-4 h-4" />
+                                      )}
                                     </button>
                                   </div>
                                 </div>
@@ -3003,14 +3110,25 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleChargeOrder}
-                      disabled={cart.length === 0}
+                      disabled={cart.length === 0 || isChargingOrder}
                       style={{
                         backgroundColor: primaryColor,
                         boxShadow: `0 12px 24px -6px ${primaryColor}55`,
                       }}
-                      className="w-full py-3.5 sm:py-4 px-6 rounded-2xl hover:opacity-95 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm sm:text-base transition-all cursor-pointer tabular-nums"
+                      className="w-full py-3.5 sm:py-4 px-6 rounded-2xl hover:opacity-95 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm sm:text-base transition-all cursor-pointer tabular-nums flex items-center justify-center gap-2"
                     >
-                      {t.chargeBtn} {formatRupiah(totalAmount)}
+                      {isChargingOrder ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <span>
+                            {isId ? 'Memproses...' : 'Processing...'}
+                          </span>
+                        </>
+                      ) : (
+                        <span>
+                          {t.chargeBtn} {formatRupiah(totalAmount)}
+                        </span>
+                      )}
                     </button>
                   </aside>
 
