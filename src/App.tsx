@@ -181,30 +181,26 @@ export default function App() {
   const [products, setProducts] = useState<ProductItem[]>(() => {
     try {
       const saved = localStorage.getItem('pinkpos_products_catalog_idr');
-      if (saved) {
+      if (saved !== null) {
         const parsed: ProductItem[] = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed.map((p, idx) => {
             const fallback = INITIAL_PRODUCTS.find((ip) => ip.id === p.id);
             const hasLegacySvg =
-              !p.imageUrl || p.imageUrl.startsWith('data:image/svg+xml');
+              typeof p.imageUrl === 'string' &&
+              p.imageUrl.startsWith('data:image/svg+xml');
             return {
               ...p,
               imageUrl:
                 hasLegacySvg && fallback ? fallback.imageUrl : p.imageUrl,
               barcode:
-                p.barcode ||
-                fallback?.barcode ||
-                `89910021${String(idx + 1).padStart(4, '0')}`,
+                p.barcode || `89910021${String(idx + 1).padStart(4, '0')}`,
               price: normalizePriceToIdr(p.price),
-              stock:
-                typeof p.stock === 'number'
-                  ? p.stock
-                  : fallback?.stock ?? 20,
+              stock: typeof p.stock === 'number' ? p.stock : 20,
               lowStockThreshold:
                 typeof p.lowStockThreshold === 'number'
                   ? p.lowStockThreshold
-                  : fallback?.lowStockThreshold ?? 5,
+                  : 5,
             };
           });
         }
@@ -435,6 +431,15 @@ export default function App() {
   const lastMutationAtRef = useRef<number>(0);
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const isApplyingRemoteUpdateRef = useRef<boolean>(false);
+  const lastRemoteSheetFingerprintRef = useRef<string>(
+    (() => {
+      try {
+        return localStorage.getItem('pinkpos_last_sheet_fingerprint') || '';
+      } catch {
+        return '';
+      }
+    })()
+  );
 
   const latestStateRef = useRef({
     products,
@@ -655,14 +660,17 @@ export default function App() {
   }, [pushToCloudDatabase, broadcastStateChange]);
 
   const applyRemoteDatabaseData = useCallback(
-    (data: {
-      initialized?: boolean;
-      sheetUrl?: string;
-      products?: ProductItem[];
-      orders?: OrderRecord[];
-      categories?: CategoryItem[];
-      storeSettings?: Record<string, unknown>;
-    }): boolean => {
+    (
+      data: {
+        initialized?: boolean;
+        sheetUrl?: string;
+        products?: ProductItem[];
+        orders?: OrderRecord[];
+        categories?: CategoryItem[];
+        storeSettings?: Record<string, unknown>;
+      },
+      force = false
+    ): boolean => {
       const syncedTime = new Date().toLocaleTimeString('id-ID');
       setLastTwoWaySyncAt(syncedTime);
       setTwoWaySyncStatus('connected');
@@ -680,11 +688,51 @@ export default function App() {
         }));
       }
 
-      // 1. Build synchronized Categories list from Sheet (and any categories referenced in Products sheet)
+      // Compute fingerprint of remote Google Sheet data so unchanged/cached Sheet snapshots
+      // never revert newer edits made in the App, while external edits in Google Sheets apply immediately!
+      const remoteFingerprint = JSON.stringify({
+        p: Array.isArray(data.products)
+          ? data.products.map((p) => ({
+              id: String(p.id || ''),
+              name: String(p.name || ''),
+              barcode: String(p.barcode || ''),
+              price: normalizePriceToIdr(p.price),
+              stock: Number(p.stock ?? 20),
+              cat: p.categories,
+              img: String(p.imageUrl || ''),
+            }))
+          : null,
+        c: Array.isArray(data.categories) ? data.categories : null,
+        o: Array.isArray(data.orders)
+          ? data.orders.map((o) => ({ id: o.orderId, tot: o.total }))
+          : null,
+        s: data.storeSettings || null,
+      });
+
+      if (
+        !force &&
+        lastRemoteSheetFingerprintRef.current &&
+        remoteFingerprint === lastRemoteSheetFingerprintRef.current
+      ) {
+        // Sheet content has not changed since last read; keep current App state intact
+        return true;
+      }
+
+      lastRemoteSheetFingerprintRef.current = remoteFingerprint;
+      try {
+        localStorage.setItem(
+          'pinkpos_last_sheet_fingerprint',
+          remoteFingerprint
+        );
+      } catch {
+        // ignore
+      }
+
+      // 1. Build synchronized Categories list strictly from Sheet (and any categories referenced in Products sheet)
       let baseCategories: CategoryItem[] =
         Array.isArray(data.categories) && data.categories.length > 0
           ? [...data.categories]
-          : [...latestStateRef.current.categories];
+          : [{ id: 'hot', name: 'Populer', nameEn: 'Hot' }];
 
       if (!baseCategories.some((c) => c.id.toLowerCase() === 'hot')) {
         baseCategories = [
@@ -718,10 +766,11 @@ export default function App() {
                   mappedCatIds.push(existing.id);
                 }
               } else {
-                const newId = trimmed
-                  .toLowerCase()
-                  .replace(/[^a-z0-9]+/g, '_')
-                  .replace(/^_|_$/g, '') || `cat_${idx}`;
+                const newId =
+                  trimmed
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, '_')
+                    .replace(/^_|_$/g, '') || `cat_${idx}`;
                 const newCat: CategoryItem = {
                   id: newId,
                   name: trimmed,
@@ -742,7 +791,10 @@ export default function App() {
                 p.barcode || `89910021${String(idx + 1).padStart(4, '0')}`,
               price: normalizePriceToIdr(p.price),
               categories: mappedCatIds.length > 0 ? mappedCatIds : ['hot'],
-              stock: typeof p.stock === 'number' && !Number.isNaN(p.stock) ? p.stock : 20,
+              stock:
+                typeof p.stock === 'number' && !Number.isNaN(p.stock)
+                  ? p.stock
+                  : 20,
               lowStockThreshold:
                 typeof p.lowStockThreshold === 'number' &&
                 !Number.isNaN(p.lowStockThreshold)
@@ -753,6 +805,14 @@ export default function App() {
         );
 
         setProducts(normalizedProducts);
+        try {
+          localStorage.setItem(
+            'pinkpos_products_catalog_idr',
+            JSON.stringify(normalizedProducts)
+          );
+        } catch {
+          // ignore
+        }
         setCart((prev) =>
           prev
             .map((c) => {
@@ -772,11 +832,27 @@ export default function App() {
         Array.isArray(data.products)
       ) {
         setCategories(baseCategories);
+        try {
+          localStorage.setItem(
+            'pinkpos_categories_list',
+            JSON.stringify(baseCategories)
+          );
+        } catch {
+          // ignore
+        }
       }
 
       // 3. Sync Orders strictly with what is in the Google Sheet (even if empty [])
       if (Array.isArray(data.orders)) {
         setOrders(data.orders);
+        try {
+          localStorage.setItem(
+            'pinkpos_orders_history_idr',
+            JSON.stringify(data.orders)
+          );
+        } catch {
+          // ignore
+        }
       }
 
       // 4. Sync StoreSettings from Google Sheet
@@ -785,10 +861,21 @@ export default function App() {
         typeof data.storeSettings.storeName === 'string' &&
         data.storeSettings.storeName
       ) {
-        setStoreSettings((prev) => ({
-          ...prev,
-          ...(data.storeSettings as Partial<StoreBrandingSettings>),
-        }));
+        setStoreSettings((prev) => {
+          const next = {
+            ...prev,
+            ...(data.storeSettings as Partial<StoreBrandingSettings>),
+          };
+          try {
+            localStorage.setItem(
+              'pinkpos_store_branding',
+              JSON.stringify(next)
+            );
+          } catch {
+            // ignore
+          }
+          return next;
+        });
       }
 
       return (
@@ -806,7 +893,7 @@ export default function App() {
       if (
         !force &&
         (inFlightMutationsRef.current > 0 ||
-          Date.now() - lastMutationAtRef.current < 3500)
+          Date.now() - lastMutationAtRef.current < 12000)
       ) {
         return;
       }
@@ -824,7 +911,7 @@ export default function App() {
           const res = await fetch(url);
           if (res.ok) {
             const data = await res.json();
-            applyRemoteDatabaseData(data);
+            applyRemoteDatabaseData(data, force);
             return;
           }
         } catch {
@@ -839,10 +926,13 @@ export default function App() {
       if (validSheetId) {
         const directData = await pullFromGoogleSheetDirect(validSheetId);
         if (directData) {
-          applyRemoteDatabaseData({
-            initialized: true,
-            ...directData,
-          });
+          applyRemoteDatabaseData(
+            {
+              initialized: true,
+              ...directData,
+            },
+            force
+          );
           return;
         }
       }
@@ -853,7 +943,6 @@ export default function App() {
       googleConfig.APPS_SCRIPT_URL,
       googleConfig.GOOGLE_SHEET_URL,
       applyRemoteDatabaseData,
-      handleSyncAllToCloud,
     ]
   );
 
@@ -1041,7 +1130,17 @@ export default function App() {
     newSettings: StoreBrandingSettings,
     logoUpload?: { data: string; name: string; mime: string }
   ) => {
+    lastMutationAtRef.current = Date.now();
     setStoreSettings(newSettings);
+    latestStateRef.current.storeSettings = newSettings;
+    try {
+      localStorage.setItem(
+        'pinkpos_store_branding',
+        JSON.stringify(newSettings)
+      );
+    } catch {
+      // ignore
+    }
     broadcastStateChange('SETTINGS_UPDATED', newSettings);
     if (newSettings.loginUsername) {
       const displayUser = newSettings.loginUsername.includes('@')
@@ -1066,13 +1165,24 @@ export default function App() {
         customLogoUrl: resp.customLogoUrl,
       };
       setStoreSettings(withDriveLogo);
+      latestStateRef.current.storeSettings = withDriveLogo;
       broadcastStateChange('SETTINGS_UPDATED', withDriveLogo);
     }
   };
 
   // Update Dynamic Categories
   const handleUpdateCategories = async (newCategories: CategoryItem[]) => {
+    lastMutationAtRef.current = Date.now();
     setCategories(newCategories);
+    latestStateRef.current.categories = newCategories;
+    try {
+      localStorage.setItem(
+        'pinkpos_categories_list',
+        JSON.stringify(newCategories)
+      );
+    } catch {
+      // ignore
+    }
     broadcastStateChange('CATEGORIES_UPDATED', newCategories);
     if (!newCategories.some((c) => c.id === activeCategory)) {
       setActiveCategory(newCategories[0]?.id || 'hot');
@@ -1081,6 +1191,13 @@ export default function App() {
       action: 'saveCategories',
       categories: newCategories,
     });
+    await pushToCloudDatabase({
+      action: 'syncAll',
+      products: latestStateRef.current.products,
+      orders: latestStateRef.current.orders,
+      categories: newCategories,
+      storeSettings: latestStateRef.current.storeSettings,
+    });
   };
 
   // Upsert (Add or Edit) Product
@@ -1088,14 +1205,26 @@ export default function App() {
     productPayload: ProductItem,
     base64Image?: { data: string; name: string; mime: string }
   ) => {
-    setProducts((prev) => {
-      const exists = prev.some((p) => p.id === productPayload.id);
-      const next = exists
-        ? prev.map((p) => (p.id === productPayload.id ? productPayload : p))
-        : [productPayload, ...prev];
-      broadcastStateChange('PRODUCTS_UPDATED', next);
-      return next;
-    });
+    lastMutationAtRef.current = Date.now();
+    const currentProducts = latestStateRef.current.products;
+    const exists = currentProducts.some((p) => p.id === productPayload.id);
+    const updatedProducts = exists
+      ? currentProducts.map((p) =>
+          p.id === productPayload.id ? productPayload : p
+        )
+      : [productPayload, ...currentProducts];
+
+    setProducts(updatedProducts);
+    latestStateRef.current.products = updatedProducts;
+    try {
+      localStorage.setItem(
+        'pinkpos_products_catalog_idr',
+        JSON.stringify(updatedProducts)
+      );
+    } catch {
+      // ignore
+    }
+    broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
 
     setCart((prev) =>
       prev.map((c) =>
@@ -1108,11 +1237,13 @@ export default function App() {
     const resp = await pushToCloudDatabase({
       action: 'upsertProduct',
       ...productPayload,
+      allProducts: updatedProducts,
       base64Data: base64Image?.data,
       fileName: base64Image?.name,
       mimeType: base64Image?.mime,
     });
 
+    let finalProducts = updatedProducts;
     if (resp && typeof resp.imageUrl === 'string' && resp.imageUrl) {
       const driveSyncedProduct: ProductItem = {
         ...productPayload,
@@ -1122,35 +1253,94 @@ export default function App() {
             ? resp.driveFileId
             : productPayload.driveFileId,
       };
-      setProducts((prev) => {
-        const next = prev.map((p) =>
-          p.id === driveSyncedProduct.id ? driveSyncedProduct : p
+      finalProducts = updatedProducts.map((p) =>
+        p.id === driveSyncedProduct.id ? driveSyncedProduct : p
+      );
+      setProducts(finalProducts);
+      latestStateRef.current.products = finalProducts;
+      try {
+        localStorage.setItem(
+          'pinkpos_products_catalog_idr',
+          JSON.stringify(finalProducts)
         );
-        broadcastStateChange('PRODUCTS_UPDATED', next);
-        return next;
-      });
+      } catch {
+        // ignore
+      }
+      broadcastStateChange('PRODUCTS_UPDATED', finalProducts);
     }
+
+    // Ensure full table sync in Google Sheets even on legacy Code.gs deployments
+    await pushToCloudDatabase({
+      action: 'syncAll',
+      products: finalProducts,
+      orders: latestStateRef.current.orders,
+      categories: latestStateRef.current.categories,
+      storeSettings: latestStateRef.current.storeSettings,
+    });
   };
 
   // Delete Product
   const handleDeleteProduct = async (productId: string) => {
-    setProducts((prev) => {
-      const next = prev.filter((p) => p.id !== productId);
-      broadcastStateChange('PRODUCTS_UPDATED', next);
-      return next;
-    });
+    lastMutationAtRef.current = Date.now();
+    const deletedTarget = latestStateRef.current.products.find(
+      (p) => p.id === productId
+    );
+    const nextProducts = latestStateRef.current.products.filter(
+      (p) => p.id !== productId
+    );
+    setProducts(nextProducts);
+    latestStateRef.current.products = nextProducts;
+    try {
+      localStorage.setItem(
+        'pinkpos_products_catalog_idr',
+        JSON.stringify(nextProducts)
+      );
+    } catch {
+      // ignore
+    }
+    broadcastStateChange('PRODUCTS_UPDATED', nextProducts);
     setCart((prev) => prev.filter((c) => c.product.id !== productId));
-    await pushToCloudDatabase({ action: 'deleteProduct', id: productId });
+
+    await pushToCloudDatabase({
+      action: 'deleteProduct',
+      id: productId,
+      name: deletedTarget?.name,
+      allProducts: nextProducts,
+    });
+    await pushToCloudDatabase({
+      action: 'syncAll',
+      products: nextProducts,
+      orders: latestStateRef.current.orders,
+      categories: latestStateRef.current.categories,
+      storeSettings: latestStateRef.current.storeSettings,
+    });
   };
 
   // Delete / Void Order in Bills
   const handleDeleteOrder = async (orderId: string) => {
-    setOrders((prev) => {
-      const next = prev.filter((o) => o.orderId !== orderId);
-      broadcastStateChange('ORDERS_UPDATED', next);
-      return next;
-    });
+    lastMutationAtRef.current = Date.now();
+    const nextOrders = latestStateRef.current.orders.filter(
+      (o) => o.orderId !== orderId
+    );
+    setOrders(nextOrders);
+    latestStateRef.current.orders = nextOrders;
+    try {
+      localStorage.setItem(
+        'pinkpos_orders_history_idr',
+        JSON.stringify(nextOrders)
+      );
+    } catch {
+      // ignore
+    }
+    broadcastStateChange('ORDERS_UPDATED', nextOrders);
     await pushToCloudDatabase({ action: 'deleteOrder', orderId });
+    await pushToCloudDatabase({
+      action: 'syncAll',
+      products: latestStateRef.current.products,
+      orders: nextOrders,
+      categories: latestStateRef.current.categories,
+      storeSettings: latestStateRef.current.storeSettings,
+    });
   };
 
   // Filtered and Sorted Products (Supports 'hot'/Populer showing all sheet products + case-insensitive category ID/name matching)
@@ -1282,24 +1472,36 @@ export default function App() {
     };
 
     // Deduct stock quantities from purchased products
-    setProducts((prev) => {
-      const next = prev.map((prod) => {
-        const orderedItem = cart.find((c) => c.product.id === prod.id);
-        if (!orderedItem) return prod;
-        return {
-          ...prod,
-          stock: Math.max(0, (prod.stock ?? 20) - orderedItem.quantity),
-        };
-      });
-      broadcastStateChange('PRODUCTS_UPDATED', next);
-      return next;
+    lastMutationAtRef.current = Date.now();
+    const updatedProducts = latestStateRef.current.products.map((prod) => {
+      const orderedItem = cart.find((c) => c.product.id === prod.id);
+      if (!orderedItem) return prod;
+      return {
+        ...prod,
+        stock: Math.max(0, (prod.stock ?? 20) - orderedItem.quantity),
+      };
     });
+    const updatedOrders = [newOrder, ...latestStateRef.current.orders];
 
-    setOrders((prev) => {
-      const next = [newOrder, ...prev];
-      broadcastStateChange('ORDERS_UPDATED', next);
-      return next;
-    });
+    setProducts(updatedProducts);
+    setOrders(updatedOrders);
+    latestStateRef.current.products = updatedProducts;
+    latestStateRef.current.orders = updatedOrders;
+    try {
+      localStorage.setItem(
+        'pinkpos_products_catalog_idr',
+        JSON.stringify(updatedProducts)
+      );
+      localStorage.setItem(
+        'pinkpos_orders_history_idr',
+        JSON.stringify(updatedOrders)
+      );
+    } catch {
+      // ignore
+    }
+    broadcastStateChange('PRODUCTS_UPDATED', updatedProducts);
+    broadcastStateChange('ORDERS_UPDATED', updatedOrders);
+
     setLastCompletedOrder(newOrder);
     setOrderSuccess(true);
     setMobileFullscreenCartOpen(false);
@@ -1312,6 +1514,7 @@ export default function App() {
     await pushToCloudDatabase({
       action: 'saveOrder',
       ...newOrder,
+      allProducts: updatedProducts,
     });
   };
 

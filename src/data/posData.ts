@@ -778,6 +778,20 @@ function doGet(e) {
   });
 }
 
+function writeProductsTable(prodSheet, productsList) {
+  prodSheet.clearContents();
+  const prodRows = [
+    ["id", "name", "barcode", "price", "categories", "isNew", "popularity", "imageUrl", "driveFileId", "stock", "lowStockThreshold"],
+    ...productsList.map(p => [
+      p.id, p.name, p.barcode || "", Number(p.price || 0),
+      (p.categories || ["hot"]).join(","), Boolean(p.isNew),
+      Number(p.popularity || 90), p.imageUrl || "", p.driveFileId || "",
+      Number(p.stock ?? 20), Number(p.lowStockThreshold ?? 5)
+    ])
+  ];
+  prodSheet.getRange(1, 1, prodRows.length, prodRows[0].length).setValues(prodRows);
+}
+
 function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents);
@@ -788,17 +802,7 @@ function doPost(e) {
     // Bulk Auto-Initialize & Sync All Data to Sheets
     if (action === "syncAll") {
       if (Array.isArray(payload.products)) {
-        prodSheet.clearContents();
-        const prodRows = [
-          ["id", "name", "barcode", "price", "categories", "isNew", "popularity", "imageUrl", "driveFileId", "stock", "lowStockThreshold"],
-          ...payload.products.map(p => [
-            p.id, p.name, p.barcode || "", Number(p.price || 0),
-            (p.categories || ["hot"]).join(","), Boolean(p.isNew),
-            Number(p.popularity || 90), p.imageUrl || "", p.driveFileId || "",
-            Number(p.stock ?? 20), Number(p.lowStockThreshold ?? 5)
-          ])
-        ];
-        prodSheet.getRange(1, 1, prodRows.length, prodRows[0].length).setValues(prodRows);
+        writeProductsTable(prodSheet, payload.products);
       }
 
       if (Array.isArray(payload.categories)) {
@@ -829,6 +833,7 @@ function doPost(e) {
         saveStoreBrandingRows(setSheet, payload.storeSettings);
       }
 
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", initialized: true, sheetUrl: ss.getUrl() });
     }
 
@@ -847,44 +852,66 @@ function doPost(e) {
         imageUrl = "https://lh3.googleusercontent.com/d/" + driveFileId + "=w600";
       }
 
-      const data = prodSheet.getDataRange().getValues();
-      let updatedRowIndex = -1;
-      for (let i = 1; i < data.length; i++) {
-        if (String(data[i][0]) === String(payload.id)) {
-          updatedRowIndex = i + 1;
-          break;
+      if (Array.isArray(payload.allProducts)) {
+        const syncedList = payload.allProducts.map(p =>
+          String(p.id) === String(payload.id)
+            ? Object.assign({}, p, { imageUrl, driveFileId })
+            : p
+        );
+        writeProductsTable(prodSheet, syncedList);
+      } else {
+        const data = prodSheet.getDataRange().getValues();
+        let updatedRowIndex = -1;
+        for (let i = 1; i < data.length; i++) {
+          if (
+            String(data[i][0]).trim() === String(payload.id).trim() ||
+            (payload.barcode && String(data[i][2]).trim() === String(payload.barcode).trim())
+          ) {
+            updatedRowIndex = i + 1;
+            break;
+          }
+        }
+
+        const rowValues = [
+          payload.id,
+          payload.name,
+          payload.barcode || "",
+          payload.price,
+          (payload.categories || ["hot"]).join(","),
+          Boolean(payload.isNew),
+          payload.popularity || 90,
+          imageUrl,
+          driveFileId,
+          payload.stock !== undefined ? Number(payload.stock) : 20,
+          payload.lowStockThreshold !== undefined ? Number(payload.lowStockThreshold) : 5
+        ];
+
+        if (updatedRowIndex > 0) {
+          prodSheet.getRange(updatedRowIndex, 1, 1, rowValues.length).setValues([rowValues]);
+        } else {
+          prodSheet.appendRow(rowValues);
         }
       }
 
-      const rowValues = [
-        payload.id,
-        payload.name,
-        payload.barcode || "",
-        payload.price,
-        (payload.categories || ["hot"]).join(","),
-        Boolean(payload.isNew),
-        payload.popularity || 90,
-        imageUrl,
-        driveFileId,
-        payload.stock !== undefined ? Number(payload.stock) : 20,
-        payload.lowStockThreshold !== undefined ? Number(payload.lowStockThreshold) : 5
-      ];
-
-      if (updatedRowIndex > 0) {
-        prodSheet.getRange(updatedRowIndex, 1, 1, rowValues.length).setValues([rowValues]);
-      } else {
-        prodSheet.appendRow(rowValues);
-      }
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", id: payload.id, imageUrl, driveFileId, sheetUrl: ss.getUrl() });
     }
 
     if (action === "deleteProduct") {
-      const data = prodSheet.getDataRange().getValues();
-      for (let i = data.length - 1; i >= 1; i--) {
-        if (String(data[i][0]) === String(payload.id)) {
-          prodSheet.deleteRow(i + 1);
+      if (Array.isArray(payload.allProducts)) {
+        writeProductsTable(prodSheet, payload.allProducts);
+      } else {
+        const data = prodSheet.getDataRange().getValues();
+        for (let i = data.length - 1; i >= 1; i--) {
+          if (
+            String(data[i][0]).trim() === String(payload.id).trim() ||
+            (payload.name && String(data[i][1]).trim() === String(payload.name).trim())
+          ) {
+            prodSheet.deleteRow(i + 1);
+          }
         }
       }
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", deletedId: payload.id, sheetUrl: ss.getUrl() });
     }
 
@@ -901,12 +928,13 @@ function doPost(e) {
         payload.cashierName || ""
       ]);
 
-      // Otomatis kurangi stok produk di Sheet Products sesuai pesanan
-      if (Array.isArray(payload.items) && payload.items.length > 0) {
+      if (Array.isArray(payload.allProducts)) {
+        writeProductsTable(prodSheet, payload.allProducts);
+      } else if (Array.isArray(payload.items) && payload.items.length > 0) {
         const prodData = prodSheet.getDataRange().getValues();
         for (let i = 1; i < prodData.length; i++) {
-          const rowId = String(prodData[i][0]);
-          const ordered = payload.items.find(it => String(it.id) === rowId);
+          const rowId = String(prodData[i][0]).trim();
+          const ordered = payload.items.find(it => String(it.id).trim() === rowId);
           if (ordered) {
             const currentStock = Number(prodData[i][9] ?? 20);
             const nextStock = Math.max(0, currentStock - Number(ordered.quantity || 0));
@@ -915,16 +943,18 @@ function doPost(e) {
         }
       }
 
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", orderId: payload.orderId, sheetUrl: ss.getUrl() });
     }
 
     if (action === "deleteOrder") {
       const data = ordSheet.getDataRange().getValues();
       for (let i = data.length - 1; i >= 1; i--) {
-        if (String(data[i][0]) === String(payload.orderId)) {
+        if (String(data[i][0]).trim() === String(payload.orderId).trim()) {
           ordSheet.deleteRow(i + 1);
         }
       }
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", deletedOrderId: payload.orderId, sheetUrl: ss.getUrl() });
     }
 
@@ -941,6 +971,7 @@ function doPost(e) {
         settingsObj.customLogoUrl = driveLogoUrl;
       }
       saveStoreBrandingRows(setSheet, settingsObj);
+      SpreadsheetApp.flush();
       return jsonResponse({
         status: "ok",
         key: "storeBranding",
@@ -961,6 +992,7 @@ function doPost(e) {
         catSheet.getRange(1, 1, catRows.length, 3).setValues(catRows);
       }
 
+      SpreadsheetApp.flush();
       return jsonResponse({ status: "ok", key: "categoriesList", sheetUrl: ss.getUrl() });
     }
 
