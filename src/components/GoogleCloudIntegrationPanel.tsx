@@ -42,6 +42,9 @@ interface GoogleCloudIntegrationPanelProps {
   ) => Promise<void>;
   products: ProductItem[];
   onSyncAllToCloud?: () => Promise<void>;
+  onPullFromCloud?: () => Promise<void>;
+  lastSyncedAt?: string;
+  syncStatus?: 'connected' | 'local_realtime' | 'syncing';
 }
 
 const TAX_RATE_PRESETS = [0, 5, 10, 11, 12];
@@ -55,6 +58,9 @@ export const GoogleCloudIntegrationPanel: React.FC<
   onUpdateStoreSettings,
   products,
   onSyncAllToCloud,
+  onPullFromCloud,
+  lastSyncedAt,
+  syncStatus = 'local_realtime',
 }) => {
   const t = TRANSLATIONS[storeSettings.language as Language];
   const isId = storeSettings.language === 'id';
@@ -69,11 +75,19 @@ export const GoogleCloudIntegrationPanel: React.FC<
   const [savedBanner, setSavedBanner] = useState(false);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [syncAllSuccess, setSyncAllSuccess] = useState(false);
+  const [isPullingCloud, setIsPullingCloud] = useState(false);
+  const [pullCloudSuccess, setPullCloudSuccess] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   React.useEffect(() => {
+    setAppsScriptUrl(config.APPS_SCRIPT_URL);
     setGoogleSheetUrl(config.GOOGLE_SHEET_URL);
-  }, [config.GOOGLE_SHEET_URL]);
+    setGoogleDriveUrl(config.GOOGLE_DRIVE_FOLDER_URL);
+  }, [
+    config.APPS_SCRIPT_URL,
+    config.GOOGLE_SHEET_URL,
+    config.GOOGLE_DRIVE_FOLDER_URL,
+  ]);
 
   // Store Branding & Theme State
   const [storeName, setStoreName] = useState(storeSettings.storeName);
@@ -119,6 +133,21 @@ export const GoogleCloudIntegrationPanel: React.FC<
   const [showLoginPass, setShowLoginPass] = useState<boolean>(false);
   const [loginAccountSaved, setLoginAccountSaved] = useState<boolean>(false);
   const [loginAccountError, setLoginAccountError] = useState<string>('');
+
+  // Keep form fields synced if storeSettings updates from 2-way database sync
+  React.useEffect(() => {
+    setStoreName(storeSettings.storeName);
+    setStoreTagline(storeSettings.storeTagline);
+    setLogoType(storeSettings.logoType);
+    setCustomLogoUrl(storeSettings.customLogoUrl);
+    setSelectedColor(storeSettings.primaryColor);
+    setTaxEnabled(storeSettings.taxEnabled !== false);
+    setTaxName(storeSettings.taxName || 'PBF');
+    setTaxRate(String(storeSettings.taxRate ?? 5));
+    setLoginUsername(storeSettings.loginUsername || 'kasir@pinkpos.id');
+    setLoginPassword(storeSettings.loginPassword || '123456');
+    setConfirmLoginPassword(storeSettings.loginPassword || '123456');
+  }, [storeSettings]);
 
   const handleSaveBranding = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -753,20 +782,74 @@ export const GoogleCloudIntegrationPanel: React.FC<
           <div className="flex items-center gap-2.5 min-w-0">
             <Link2 className="w-5 h-5 shrink-0" style={{ color: primaryColor }} />
             <div className="min-w-0">
-              <h3 className="font-extrabold text-sm sm:text-base text-[#2D3748] truncate">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-extrabold text-sm sm:text-base text-[#2D3748] truncate">
+                  {isId
+                    ? 'Sinkronisasi Database 2 Arah (Aplikasi ↔ Google Sheets)'
+                    : '2-Way Database Sync (App ↔ Google Sheets)'}
+                </h3>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      syncStatus === 'syncing'
+                        ? 'bg-amber-500 animate-ping'
+                        : 'bg-emerald-500 animate-pulse'
+                    }`}
+                  />
+                  {syncStatus === 'syncing'
+                    ? isId
+                      ? 'Menyinkronkan 2 Arah...'
+                      : 'Syncing 2-Way...'
+                    : isId
+                    ? 'Terhubung 2 Arah · Real-Time'
+                    : '2-Way Connected · Real-Time'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 line-clamp-1 mt-0.5">
                 {isId
-                  ? 'Konfigurasi Endpoint Cloud & Penyimpanan'
-                  : 'Cloud Endpoint & Storage Configuration'}
-              </h3>
-              <p className="text-xs text-slate-400 line-clamp-1">
-                {isId
-                  ? 'Tautan koneksi layanan database dan penyimpanan media toko'
-                  : 'Database and media storage connection endpoints'}
+                  ? `Otomatis sinkron setiap 8 detik & saat ada perubahan (${products.length} produk aktif${lastSyncedAt ? ` · Update: ${lastSyncedAt}` : ''})`
+                  : `Auto-syncs every 8s & on data changes (${products.length} active products${lastSyncedAt ? ` · Last sync: ${lastSyncedAt}` : ''})`}
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            {onPullFromCloud && (
+              <button
+                type="button"
+                disabled={isPullingCloud}
+                onClick={async () => {
+                  setIsPullingCloud(true);
+                  setPullCloudSuccess(false);
+                  try {
+                    await onPullFromCloud();
+                    setPullCloudSuccess(true);
+                    setTimeout(() => setPullCloudSuccess(false), 3000);
+                  } finally {
+                    setIsPullingCloud(false);
+                  }
+                }}
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 disabled:opacity-60 text-white text-xs font-bold shadow-sm transition-all cursor-pointer"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 shrink-0 ${isPullingCloud ? 'animate-spin' : ''}`}
+                />
+                <span className="truncate">
+                  {isPullingCloud
+                    ? isId
+                      ? 'Menarik Data Sheet...'
+                      : 'Pulling from Sheet...'
+                    : pullCloudSuccess
+                    ? isId
+                      ? 'Data Sheet Ditarik!'
+                      : 'Pulled from Sheet!'
+                    : isId
+                    ? 'Tarik dari Sheet (Sheet → Aplikasi)'
+                    : 'Pull from Sheet (Sheet → App)'}
+                </span>
+              </button>
+            )}
+
             {onSyncAllToCloud && (
               <button
                 type="button"
@@ -782,7 +865,7 @@ export const GoogleCloudIntegrationPanel: React.FC<
                     setIsSyncingAll(false);
                   }
                 }}
-                className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-bold shadow-sm transition-all cursor-pointer"
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-bold shadow-sm transition-all cursor-pointer"
               >
                 <RefreshCw
                   className={`w-3.5 h-3.5 shrink-0 ${isSyncingAll ? 'animate-spin' : ''}`}
@@ -790,15 +873,15 @@ export const GoogleCloudIntegrationPanel: React.FC<
                 <span className="truncate">
                   {isSyncingAll
                     ? isId
-                      ? 'Membuat & Menyinkronkan Sheet...'
-                      : 'Creating & Syncing Sheets...'
+                      ? 'Mengirim ke Sheet...'
+                      : 'Pushing to Sheet...'
                     : syncAllSuccess
                     ? isId
-                      ? 'Sheet Otomatis Tersinkron!'
-                      : 'Sheets Auto-Synced!'
+                      ? 'Tersinkron ke Sheet!'
+                      : 'Synced to Sheet!'
                     : isId
-                    ? 'Buat & Sinkronkan Sheet Otomatis'
-                    : 'Auto-Create & Sync Sheets'}
+                    ? 'Kirim ke Sheet (Aplikasi → Sheet)'
+                    : 'Push to Sheet (App → Sheet)'}
                 </span>
               </button>
             )}

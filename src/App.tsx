@@ -47,8 +47,10 @@ import {
   PERMANENT_GOOGLE_CONFIG,
   PermanentGoogleConfig,
   ProductItem,
+  extractValidSpreadsheetId,
   formatRupiah,
   normalizePriceToIdr,
+  pullFromGoogleSheetDirect,
   resolveGoogleDriveImageUrl,
 } from './data/posData';
 import {
@@ -110,18 +112,11 @@ function playScannerBeep(success = true) {
 }
 
 export default function App() {
-  // Opening animation plays first when the application is opened
-  const [showOpeningAnim, setShowOpeningAnim] = useState<boolean>(true);
+  // Opening animation plays after login transition into the workspace
+  const [showOpeningAnim, setShowOpeningAnim] = useState<boolean>(false);
 
-  // Authentication State
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('pinkpos_auth_session');
-      return saved ? JSON.parse(saved) : true;
-    } catch {
-      return true;
-    }
-  });
+  // Authentication State — Always start at Login page on initial app load
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [cashierName, setCashierName] = useState<string>('Admin Kasir');
 
   // Navigation & View States
@@ -244,51 +239,20 @@ export default function App() {
   const lastKeyTimeRef = useRef<number>(0);
   const scanToastTimeoutRef = useRef<number | null>(null);
 
-  // Orders History in Rupiah
+  // Orders History in Rupiah — Strictly synced with database/sheet (no fake hardcoded orders)
   const [orders, setOrders] = useState<OrderRecord[]>(() => {
     try {
       const saved = localStorage.getItem('pinkpos_orders_history_idr');
       if (saved) {
         const parsed: OrderRecord[] = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed.filter((o) => o.orderId !== 'ORD-849201');
+        }
       }
     } catch {
       // ignore
     }
-    return [
-      {
-        orderId: 'ORD-849201',
-        createdAt: '11/11/2026, 19:42',
-        cashierName: 'Admin Kasir',
-        items: [
-          {
-            id: 'prod-cheese-burger',
-            name: 'Cheese Burger',
-            price: 30000,
-            quantity: 2,
-            subtotal: 60000,
-          },
-          {
-            id: 'prod-coffee-latte',
-            name: 'Coffee Latte',
-            price: 18000,
-            quantity: 3,
-            subtotal: 54000,
-          },
-          {
-            id: 'prod-chicken-nugget',
-            name: 'Chicken Nugget',
-            price: 25000,
-            quantity: 2,
-            subtotal: 50000,
-          },
-        ],
-        subTotal: 164000,
-        taxPbf: 8200,
-        total: 172200,
-        syncedToSheet: true,
-      },
-    ];
+    return [];
   });
 
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -451,18 +415,27 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(
-        'pinkpos_auth_session',
-        JSON.stringify(isAuthenticated)
-      );
+      localStorage.removeItem('pinkpos_auth_session');
     } catch {
       // ignore
     }
-  }, [isAuthenticated]);
+  }, []);
 
   // ==========================================================================
   // AUTOMATIC SHEET CREATION & REAL-TIME 2-WAY CLOUD DATABASE ENGINE
   // ==========================================================================
+  const [lastTwoWaySyncAt, setLastTwoWaySyncAt] = useState<string>(() =>
+    new Date().toLocaleTimeString('id-ID')
+  );
+  const [twoWaySyncStatus, setTwoWaySyncStatus] = useState<
+    'connected' | 'local_realtime' | 'syncing'
+  >('local_realtime');
+
+  const inFlightMutationsRef = useRef<number>(0);
+  const lastMutationAtRef = useRef<number>(0);
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const isApplyingRemoteUpdateRef = useRef<boolean>(false);
+
   const latestStateRef = useRef({
     products,
     orders,
@@ -473,11 +446,138 @@ export default function App() {
     latestStateRef.current = { products, orders, categories, storeSettings };
   }, [products, orders, categories, storeSettings]);
 
+  const broadcastStateChange = useCallback(
+    (type: string, payload: unknown) => {
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type,
+          payload,
+          timestamp: Date.now(),
+        });
+      } catch {
+        // ignore if BroadcastChannel is unsupported
+      }
+    },
+    []
+  );
+
+  // Real-time 2-Way Cross-Tab & Multi-Window Database Synchronization
+  useEffect(() => {
+    let channel: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        channel = new BroadcastChannel('pinkpos_2way_db_channel');
+        broadcastChannelRef.current = channel;
+        channel.onmessage = (event) => {
+          const msg = event.data;
+          if (!msg || typeof msg.type !== 'string') return;
+          isApplyingRemoteUpdateRef.current = true;
+          const nowStr = new Date().toLocaleTimeString('id-ID');
+          setLastTwoWaySyncAt(nowStr);
+
+          if (msg.type === 'PRODUCTS_UPDATED' && Array.isArray(msg.payload)) {
+            const nextProducts = msg.payload as ProductItem[];
+            setProducts(nextProducts);
+            setCart((prev) =>
+              prev
+                .map((c) => {
+                  const updatedProd = nextProducts.find(
+                    (p) => p.id === c.product.id
+                  );
+                  return updatedProd ? { ...c, product: updatedProd } : c;
+                })
+                .filter((c) =>
+                  nextProducts.some((p) => p.id === c.product.id)
+                )
+            );
+          } else if (
+            msg.type === 'CATEGORIES_UPDATED' &&
+            Array.isArray(msg.payload)
+          ) {
+            setCategories(msg.payload as CategoryItem[]);
+          } else if (
+            msg.type === 'ORDERS_UPDATED' &&
+            Array.isArray(msg.payload)
+          ) {
+            setOrders(msg.payload as OrderRecord[]);
+          } else if (msg.type === 'SETTINGS_UPDATED' && msg.payload) {
+            setStoreSettings((prev) => ({
+              ...prev,
+              ...(msg.payload as StoreBrandingSettings),
+            }));
+          } else if (msg.type === 'CONFIG_UPDATED' && msg.payload) {
+            setGoogleConfig((prev) => ({
+              ...prev,
+              ...(msg.payload as PermanentGoogleConfig),
+            }));
+          }
+
+          window.setTimeout(() => {
+            isApplyingRemoteUpdateRef.current = false;
+          }, 60);
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (!e.newValue) return;
+      try {
+        const parsed = JSON.parse(e.newValue);
+        setLastTwoWaySyncAt(new Date().toLocaleTimeString('id-ID'));
+        if (e.key === 'pinkpos_products_catalog_idr' && Array.isArray(parsed)) {
+          setProducts(parsed);
+        } else if (
+          e.key === 'pinkpos_categories_list' &&
+          Array.isArray(parsed)
+        ) {
+          setCategories(parsed);
+        } else if (
+          e.key === 'pinkpos_orders_history_idr' &&
+          Array.isArray(parsed)
+        ) {
+          setOrders(parsed);
+        } else if (e.key === 'pinkpos_store_branding' && parsed) {
+          setStoreSettings((prev) => ({ ...prev, ...parsed }));
+        } else if (e.key === 'pinkpos_permanent_google_config' && parsed) {
+          setGoogleConfig((prev) => ({ ...prev, ...parsed }));
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener('storage', handleStorageEvent);
+    return () => {
+      window.removeEventListener('storage', handleStorageEvent);
+      try {
+        channel?.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
   const pushToCloudDatabase = useCallback(
-    async (payload: Record<string, unknown>) => {
+    async (
+      payload: Record<string, unknown>
+    ): Promise<Record<string, unknown> | null> => {
+      const nowStr = new Date().toLocaleTimeString('id-ID');
+      setLastTwoWaySyncAt(nowStr);
+
       const scriptUrl = googleConfig.APPS_SCRIPT_URL?.trim();
-      if (!scriptUrl) return;
+      if (
+        !scriptUrl ||
+        scriptUrl.includes('AKfycbx9PinkPOS_Permanent_Cloud_Database_Exec_v1')
+      ) {
+        return null;
+      }
+
       const bodyStr = JSON.stringify(payload);
+      inFlightMutationsRef.current += 1;
+      lastMutationAtRef.current = Date.now();
+      setTwoWaySyncStatus('syncing');
 
       try {
         // Use text/plain so Google Apps Script accepts POST without CORS preflight rejection
@@ -488,18 +588,27 @@ export default function App() {
         });
         if (res.ok) {
           const data = await res.json().catch(() => null);
+          const syncedTime = new Date().toLocaleTimeString('id-ID');
+          setLastTwoWaySyncAt(syncedTime);
+          setTwoWaySyncStatus('connected');
+
           if (data && typeof data.sheetUrl === 'string' && data.sheetUrl) {
-            setGoogleConfig((prev) =>
-              prev.GOOGLE_SHEET_URL === data.sheetUrl
-                ? prev
-                : {
-                    ...prev,
-                    GOOGLE_SHEET_URL: data.sheetUrl,
-                    LAST_SYNCED: new Date().toLocaleTimeString(),
-                  }
-            );
+            setGoogleConfig((prev) => {
+              const updatedCfg = {
+                ...prev,
+                GOOGLE_SHEET_URL: data.sheetUrl,
+                LAST_SYNCED: syncedTime,
+              };
+              broadcastStateChange('CONFIG_UPDATED', updatedCfg);
+              return updatedCfg;
+            });
+          } else {
+            setGoogleConfig((prev) => ({
+              ...prev,
+              LAST_SYNCED: syncedTime,
+            }));
           }
-          return;
+          return data;
         }
       } catch {
         // Fallback to no-cors fire-and-forget if browser blocks cross-origin redirect reading
@@ -510,17 +619,32 @@ export default function App() {
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             body: bodyStr,
           });
+          const syncedTime = new Date().toLocaleTimeString('id-ID');
+          setLastTwoWaySyncAt(syncedTime);
+          setTwoWaySyncStatus('connected');
         } catch {
-          // silent background sync
+          setTwoWaySyncStatus('local_realtime');
         }
+      } finally {
+        inFlightMutationsRef.current = Math.max(
+          0,
+          inFlightMutationsRef.current - 1
+        );
+        lastMutationAtRef.current = Date.now();
       }
+      return null;
     },
-    [googleConfig.APPS_SCRIPT_URL]
+    [googleConfig.APPS_SCRIPT_URL, broadcastStateChange]
   );
 
   // Full Automatic Sheet Creation & Bulk Sync (Products, Orders, Categories, StoreSettings)
   const handleSyncAllToCloud = useCallback(async () => {
     const current = latestStateRef.current;
+    broadcastStateChange('PRODUCTS_UPDATED', current.products);
+    broadcastStateChange('CATEGORIES_UPDATED', current.categories);
+    broadcastStateChange('ORDERS_UPDATED', current.orders);
+    broadcastStateChange('SETTINGS_UPDATED', current.storeSettings);
+
     await pushToCloudDatabase({
       action: 'syncAll',
       products: current.products,
@@ -528,73 +652,244 @@ export default function App() {
       categories: current.categories,
       storeSettings: current.storeSettings,
     });
-  }, [pushToCloudDatabase]);
+  }, [pushToCloudDatabase, broadcastStateChange]);
 
-  const handleSyncTwoWay = useCallback(async () => {
-    try {
-      const scriptUrl = googleConfig.APPS_SCRIPT_URL?.trim();
-      if (!scriptUrl) return;
-      const url = `${scriptUrl}?action=getAllData&t=${Date.now()}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && typeof data.sheetUrl === 'string' && data.sheetUrl) {
-          setGoogleConfig((prev) =>
-            prev.GOOGLE_SHEET_URL === data.sheetUrl
-              ? prev
-              : {
-                  ...prev,
-                  GOOGLE_SHEET_URL: data.sheetUrl,
-                  LAST_SYNCED: new Date().toLocaleTimeString(),
+  const applyRemoteDatabaseData = useCallback(
+    (data: {
+      initialized?: boolean;
+      sheetUrl?: string;
+      products?: ProductItem[];
+      orders?: OrderRecord[];
+      categories?: CategoryItem[];
+      storeSettings?: Record<string, unknown>;
+    }): boolean => {
+      const syncedTime = new Date().toLocaleTimeString('id-ID');
+      setLastTwoWaySyncAt(syncedTime);
+      setTwoWaySyncStatus('connected');
+
+      if (typeof data.sheetUrl === 'string' && data.sheetUrl) {
+        setGoogleConfig((prev) => ({
+          ...prev,
+          GOOGLE_SHEET_URL: data.sheetUrl!,
+          LAST_SYNCED: syncedTime,
+        }));
+      } else {
+        setGoogleConfig((prev) => ({
+          ...prev,
+          LAST_SYNCED: syncedTime,
+        }));
+      }
+
+      // 1. Build synchronized Categories list from Sheet (and any categories referenced in Products sheet)
+      let baseCategories: CategoryItem[] =
+        Array.isArray(data.categories) && data.categories.length > 0
+          ? [...data.categories]
+          : [...latestStateRef.current.categories];
+
+      if (!baseCategories.some((c) => c.id.toLowerCase() === 'hot')) {
+        baseCategories = [
+          { id: 'hot', name: 'Populer', nameEn: 'Hot' },
+          ...baseCategories,
+        ];
+      }
+
+      // 2. Sync Products strictly with what is in the Google Sheet (including empty sheet or custom categories)
+      if (Array.isArray(data.products)) {
+        const normalizedProducts = data.products.map(
+          (p: ProductItem, idx: number) => {
+            const rawCats =
+              Array.isArray(p.categories) && p.categories.length > 0
+                ? p.categories
+                : ['hot'];
+
+            const mappedCatIds: string[] = [];
+            rawCats.forEach((rawCat) => {
+              const trimmed = String(rawCat || '').trim();
+              if (!trimmed) return;
+              const lower = trimmed.toLowerCase();
+              const existing = baseCategories.find(
+                (c) =>
+                  c.id.toLowerCase() === lower ||
+                  c.name.toLowerCase() === lower ||
+                  (c.nameEn && c.nameEn.toLowerCase() === lower)
+              );
+              if (existing) {
+                if (!mappedCatIds.includes(existing.id)) {
+                  mappedCatIds.push(existing.id);
                 }
-          );
-        }
+              } else {
+                const newId = trimmed
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, '_')
+                  .replace(/^_|_$/g, '') || `cat_${idx}`;
+                const newCat: CategoryItem = {
+                  id: newId,
+                  name: trimmed,
+                  nameEn: trimmed,
+                };
+                baseCategories.push(newCat);
+                if (!mappedCatIds.includes(newId)) {
+                  mappedCatIds.push(newId);
+                }
+              }
+            });
 
-        const hasRemoteProducts =
-          Array.isArray(data.products) && data.products.length > 0;
-        const hasRemoteOrders =
-          Array.isArray(data.orders) && data.orders.length > 0;
-        const hasRemoteCategories =
-          Array.isArray(data.categories) && data.categories.length > 0;
-
-        if (hasRemoteProducts) {
-          setProducts(
-            data.products.map((p: ProductItem, idx: number) => ({
+            return {
               ...p,
+              id: String(p.id || `prod-${idx + 1}`),
+              name: String(p.name || `Produk ${idx + 1}`),
               barcode:
                 p.barcode || `89910021${String(idx + 1).padStart(4, '0')}`,
               price: normalizePriceToIdr(p.price),
-              stock: typeof p.stock === 'number' ? p.stock : 20,
+              categories: mappedCatIds.length > 0 ? mappedCatIds : ['hot'],
+              stock: typeof p.stock === 'number' && !Number.isNaN(p.stock) ? p.stock : 20,
               lowStockThreshold:
-                typeof p.lowStockThreshold === 'number'
+                typeof p.lowStockThreshold === 'number' &&
+                !Number.isNaN(p.lowStockThreshold)
                   ? p.lowStockThreshold
                   : 5,
-            }))
-          );
-        }
-        if (hasRemoteOrders) {
-          setOrders(data.orders);
-        }
-        if (hasRemoteCategories) {
-          setCategories(data.categories);
-        }
-        if (data.storeSettings && data.storeSettings.storeName) {
-          setStoreSettings((prev) => ({ ...prev, ...data.storeSettings }));
-        }
+            };
+          }
+        );
 
-        // If the Google Sheet was just auto-created and is still empty, automatically populate all tabs!
-        if (!hasRemoteProducts && !hasRemoteCategories) {
-          handleSyncAllToCloud();
+        setProducts(normalizedProducts);
+        setCart((prev) =>
+          prev
+            .map((c) => {
+              const updatedProd = normalizedProducts.find(
+                (p) => p.id === c.product.id
+              );
+              return updatedProd ? { ...c, product: updatedProd } : c;
+            })
+            .filter((c) =>
+              normalizedProducts.some((p) => p.id === c.product.id)
+            )
+        );
+      }
+
+      if (
+        (Array.isArray(data.categories) && data.categories.length > 0) ||
+        Array.isArray(data.products)
+      ) {
+        setCategories(baseCategories);
+      }
+
+      // 3. Sync Orders strictly with what is in the Google Sheet (even if empty [])
+      if (Array.isArray(data.orders)) {
+        setOrders(data.orders);
+      }
+
+      // 4. Sync StoreSettings from Google Sheet
+      if (
+        data.storeSettings &&
+        typeof data.storeSettings.storeName === 'string' &&
+        data.storeSettings.storeName
+      ) {
+        setStoreSettings((prev) => ({
+          ...prev,
+          ...(data.storeSettings as Partial<StoreBrandingSettings>),
+        }));
+      }
+
+      return (
+        Array.isArray(data.products) ||
+        Array.isArray(data.categories) ||
+        Array.isArray(data.orders)
+      );
+    },
+    []
+  );
+
+  // Pull & Sync 2-Way (Database/Sheet -> Application as Single Source of Truth)
+  const handleSyncTwoWay = useCallback(
+    async (force = false) => {
+      if (
+        !force &&
+        (inFlightMutationsRef.current > 0 ||
+          Date.now() - lastMutationAtRef.current < 3500)
+      ) {
+        return;
+      }
+
+      const scriptUrl = googleConfig.APPS_SCRIPT_URL?.trim();
+      const isCustomScriptUrl =
+        Boolean(scriptUrl) &&
+        !scriptUrl.includes('AKfycbx9PinkPOS_Permanent_Cloud_Database_Exec_v1');
+
+      // 1. Primary 2-Way Pull via Google Apps Script Web App
+      if (isCustomScriptUrl && scriptUrl) {
+        try {
+          setTwoWaySyncStatus('syncing');
+          const url = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=getAllData&t=${Date.now()}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const data = await res.json();
+            applyRemoteDatabaseData(data);
+            return;
+          }
+        } catch {
+          // Proceed to direct Google Sheet GViz fallback if Apps Script GET fails
         }
       }
-    } catch {
-      // silent background sync
-    }
-  }, [googleConfig.APPS_SCRIPT_URL, handleSyncAllToCloud]);
 
+      // 2. Secondary 2-Way Pull directly from Google Spreadsheet (GViz API) if a valid Sheet URL is configured
+      const validSheetId = extractValidSpreadsheetId(
+        googleConfig.GOOGLE_SHEET_URL
+      );
+      if (validSheetId) {
+        const directData = await pullFromGoogleSheetDirect(validSheetId);
+        if (directData) {
+          applyRemoteDatabaseData({
+            initialized: true,
+            ...directData,
+          });
+          return;
+        }
+      }
+
+      setTwoWaySyncStatus(isCustomScriptUrl ? 'connected' : 'local_realtime');
+    },
+    [
+      googleConfig.APPS_SCRIPT_URL,
+      googleConfig.GOOGLE_SHEET_URL,
+      applyRemoteDatabaseData,
+      handleSyncAllToCloud,
+    ]
+  );
+
+  // Initial 2-Way Sync + Real-Time Polling Every 8 Seconds + Window Focus & Visibility Sync
   useEffect(() => {
     handleSyncTwoWay();
+
+    const intervalId = window.setInterval(() => {
+      handleSyncTwoWay(false);
+    }, 8000);
+
+    const handleWindowFocus = () => {
+      handleSyncTwoWay(false);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleSyncTwoWay(false);
+      }
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [handleSyncTwoWay]);
+
+  // Also pull latest 2-way changes whenever switching POS navigation tabs
+  useEffect(() => {
+    if (isAuthenticated) {
+      handleSyncTwoWay(false);
+    }
+  }, [activeNav, isAuthenticated, handleSyncTwoWay]);
 
   // Cart Handlers
   const handleAddToCart = useCallback((product: ProductItem) => {
@@ -737,6 +1032,7 @@ export default function App() {
       language: nextLang,
     };
     setStoreSettings(updated);
+    broadcastStateChange('SETTINGS_UPDATED', updated);
     pushToCloudDatabase({ action: 'saveStoreSettings', settings: updated });
   };
 
@@ -746,24 +1042,38 @@ export default function App() {
     logoUpload?: { data: string; name: string; mime: string }
   ) => {
     setStoreSettings(newSettings);
+    broadcastStateChange('SETTINGS_UPDATED', newSettings);
     if (newSettings.loginUsername) {
       const displayUser = newSettings.loginUsername.includes('@')
         ? newSettings.loginUsername.split('@')[0]
         : newSettings.loginUsername;
       setCashierName(displayUser);
     }
-    await pushToCloudDatabase({
+    const resp = await pushToCloudDatabase({
       action: 'saveStoreSettings',
       settings: newSettings,
       logoBase64: logoUpload?.data,
       logoFileName: logoUpload?.name,
       logoMimeType: logoUpload?.mime,
     });
+    if (
+      resp &&
+      typeof resp.customLogoUrl === 'string' &&
+      resp.customLogoUrl
+    ) {
+      const withDriveLogo: StoreBrandingSettings = {
+        ...newSettings,
+        customLogoUrl: resp.customLogoUrl,
+      };
+      setStoreSettings(withDriveLogo);
+      broadcastStateChange('SETTINGS_UPDATED', withDriveLogo);
+    }
   };
 
   // Update Dynamic Categories
   const handleUpdateCategories = async (newCategories: CategoryItem[]) => {
     setCategories(newCategories);
+    broadcastStateChange('CATEGORIES_UPDATED', newCategories);
     if (!newCategories.some((c) => c.id === activeCategory)) {
       setActiveCategory(newCategories[0]?.id || 'hot');
     }
@@ -780,12 +1090,11 @@ export default function App() {
   ) => {
     setProducts((prev) => {
       const exists = prev.some((p) => p.id === productPayload.id);
-      if (exists) {
-        return prev.map((p) =>
-          p.id === productPayload.id ? productPayload : p
-        );
-      }
-      return [productPayload, ...prev];
+      const next = exists
+        ? prev.map((p) => (p.id === productPayload.id ? productPayload : p))
+        : [productPayload, ...prev];
+      broadcastStateChange('PRODUCTS_UPDATED', next);
+      return next;
     });
 
     setCart((prev) =>
@@ -796,39 +1105,78 @@ export default function App() {
       )
     );
 
-    await pushToCloudDatabase({
+    const resp = await pushToCloudDatabase({
       action: 'upsertProduct',
       ...productPayload,
       base64Data: base64Image?.data,
       fileName: base64Image?.name,
       mimeType: base64Image?.mime,
     });
+
+    if (resp && typeof resp.imageUrl === 'string' && resp.imageUrl) {
+      const driveSyncedProduct: ProductItem = {
+        ...productPayload,
+        imageUrl: resp.imageUrl,
+        driveFileId:
+          typeof resp.driveFileId === 'string'
+            ? resp.driveFileId
+            : productPayload.driveFileId,
+      };
+      setProducts((prev) => {
+        const next = prev.map((p) =>
+          p.id === driveSyncedProduct.id ? driveSyncedProduct : p
+        );
+        broadcastStateChange('PRODUCTS_UPDATED', next);
+        return next;
+      });
+    }
   };
 
   // Delete Product
   const handleDeleteProduct = async (productId: string) => {
-    setProducts((prev) => prev.filter((p) => p.id !== productId));
+    setProducts((prev) => {
+      const next = prev.filter((p) => p.id !== productId);
+      broadcastStateChange('PRODUCTS_UPDATED', next);
+      return next;
+    });
     setCart((prev) => prev.filter((c) => c.product.id !== productId));
     await pushToCloudDatabase({ action: 'deleteProduct', id: productId });
   };
 
   // Delete / Void Order in Bills
   const handleDeleteOrder = async (orderId: string) => {
-    setOrders((prev) => prev.filter((o) => o.orderId !== orderId));
+    setOrders((prev) => {
+      const next = prev.filter((o) => o.orderId !== orderId);
+      broadcastStateChange('ORDERS_UPDATED', next);
+      return next;
+    });
     await pushToCloudDatabase({ action: 'deleteOrder', orderId });
   };
 
-  // Filtered and Sorted Products
+  // Filtered and Sorted Products (Supports 'hot'/Populer showing all sheet products + case-insensitive category ID/name matching)
   const visibleProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const activeCatObj = categories.find((c) => c.id === activeCategory);
+    const activeCatLower = activeCategory.toLowerCase();
+    const activeNameLower = activeCatObj?.name.toLowerCase() || '';
+    const activeNameEnLower = activeCatObj?.nameEn?.toLowerCase() || '';
+
     const list = products.filter((item) => {
-      const matchesCategory = q
-        ? true
-        : item.categories.includes(activeCategory);
+      const matchesCategory =
+        q || activeCatLower === 'hot' || activeCatLower === 'all'
+          ? true
+          : item.categories.some((cat) => {
+              const cl = cat.toLowerCase();
+              return (
+                cl === activeCatLower ||
+                (activeNameLower && cl === activeNameLower) ||
+                (activeNameEnLower && cl === activeNameEnLower)
+              );
+            });
       const matchesSearch = q
         ? item.name.toLowerCase().includes(q) ||
           (item.barcode && item.barcode.toLowerCase().includes(q)) ||
-          item.categories.some((c) => c.includes(q))
+          item.categories.some((c) => c.toLowerCase().includes(q))
         : true;
       return matchesCategory && matchesSearch;
     });
@@ -837,9 +1185,14 @@ export default function App() {
       if (sortBy === 'price_asc') return a.price - b.price;
       if (sortBy === 'price_desc') return b.price - a.price;
       if (sortBy === 'newest') return (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0);
+      if (activeCatLower === 'hot') {
+        const aHot = a.categories.some((c) => c.toLowerCase() === 'hot') ? 1 : 0;
+        const bHot = b.categories.some((c) => c.toLowerCase() === 'hot') ? 1 : 0;
+        if (bHot !== aHot) return bHot - aHot;
+      }
       return b.popularity - a.popularity;
     });
-  }, [products, activeCategory, searchQuery, sortBy]);
+  }, [products, categories, activeCategory, searchQuery, sortBy]);
 
   // Dynamic Tax Rate & Cart Calculations in Rupiah
   const activeTaxRate =
@@ -929,18 +1282,24 @@ export default function App() {
     };
 
     // Deduct stock quantities from purchased products
-    setProducts((prev) =>
-      prev.map((prod) => {
+    setProducts((prev) => {
+      const next = prev.map((prod) => {
         const orderedItem = cart.find((c) => c.product.id === prod.id);
         if (!orderedItem) return prod;
         return {
           ...prod,
           stock: Math.max(0, (prod.stock ?? 20) - orderedItem.quantity),
         };
-      })
-    );
+      });
+      broadcastStateChange('PRODUCTS_UPDATED', next);
+      return next;
+    });
 
-    setOrders((prev) => [newOrder, ...prev]);
+    setOrders((prev) => {
+      const next = [newOrder, ...prev];
+      broadcastStateChange('ORDERS_UPDATED', next);
+      return next;
+    });
     setLastCompletedOrder(newOrder);
     setOrderSuccess(true);
     setMobileFullscreenCartOpen(false);
@@ -2099,12 +2458,20 @@ export default function App() {
                         config={googleConfig}
                         onUpdateConfig={(newCfg) => {
                           setGoogleConfig(newCfg);
-                          setTimeout(() => handleSyncAllToCloud(), 100);
+                          broadcastStateChange('CONFIG_UPDATED', newCfg);
+                          setTimeout(() => {
+                            handleSyncTwoWay(true);
+                          }, 120);
                         }}
                         storeSettings={storeSettings}
                         onUpdateStoreSettings={handleUpdateStoreSettings}
                         products={products}
                         onSyncAllToCloud={handleSyncAllToCloud}
+                        onPullFromCloud={() => handleSyncTwoWay(true)}
+                        lastSyncedAt={
+                          lastTwoWaySyncAt || googleConfig.LAST_SYNCED
+                        }
+                        syncStatus={twoWaySyncStatus}
                       />
                     </div>
                   )}

@@ -86,16 +86,31 @@ export const ProductsManagementView: React.FC<ProductsManagementViewProps> = ({
 
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const filterCatLower = filterCat.toLowerCase();
+    const selectedCatObj = categories.find((c) => c.id === filterCat);
+    const selectedNameLower = selectedCatObj?.name.toLowerCase() || '';
+    const selectedNameEnLower = selectedCatObj?.nameEn?.toLowerCase() || '';
+
     return products.filter((p) => {
       const matchCat =
-        filterCat === 'all' ? true : p.categories.includes(filterCat);
+        filterCatLower === 'all' || filterCatLower === 'hot'
+          ? true
+          : p.categories.some((c) => {
+              const cl = c.toLowerCase();
+              return (
+                cl === filterCatLower ||
+                (selectedNameLower && cl === selectedNameLower) ||
+                (selectedNameEnLower && cl === selectedNameEnLower)
+              );
+            });
       const matchSearch = q
         ? p.name.toLowerCase().includes(q) ||
-          (p.barcode && p.barcode.toLowerCase().includes(q))
+          (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+          p.categories.some((c) => c.toLowerCase().includes(q))
         : true;
       return matchCat && matchSearch;
     });
-  }, [products, filterCat, searchQuery]);
+  }, [products, categories, filterCat, searchQuery]);
 
   const generateNextBarcode = () => {
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
