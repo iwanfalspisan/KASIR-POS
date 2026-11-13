@@ -1,0 +1,6 @@
+{
+  "name": "PinkPOS — Cloud Point of Sale",
+  "description": "Modern tablet-optimized Point of Sale (POS) web application integrated with Google Sheets database and Google Drive image hosting via Google Apps Script.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

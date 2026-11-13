@@ -1,0 +1,232 @@
+@import "tailwindcss";
+
+:root {
+  --theme-primary: #FF2457;
+  --theme-selection-bg: #FF245726;
+}
+
+::selection {
+  background-color: var(--theme-selection-bg);
+  color: var(--theme-primary);
+}
+
+::-moz-selection {
+  background-color: var(--theme-selection-bg);
+  color: var(--theme-primary);
+}
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #2D3748;
+    background-color: #F4F5F7;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  button, a, input, select, textarea {
+    transition-property: color, background-color, border-color, opacity, box-shadow, transform;
+    transition-duration: 180ms;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   GPU-ACCELERATED APP-WIDE TRANSITION ANIMATION SYSTEM (Zero Lag)
+   ============================================================================ */
+
+/* 1. Full Stage / Screen Transition (Login <-> POS Workspace <-> Success) */
+@keyframes stageFadeScale {
+  0% {
+    opacity: 0;
+    transform: scale(0.986) translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* 2. Main Navigation Menu View Transition (Beranda, Produk, Dashboard, Transaksi, Pengaturan) */
+@keyframes menuPageEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.992);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 3. Sub-Tab / Filter / Period Switch Transition */
+@keyframes subviewSlideIn {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 4. Staggered Product, KPI, Settings & Transaction Card Entrance */
+@keyframes cardStaggerEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.975);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 5. Cart Item Slide-In Entrance */
+@keyframes cartItemSlideIn {
+  0% {
+    opacity: 0;
+    transform: translateX(16px) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* 6. Left Sidebar & Right Order Panel Slide Transitions */
+@keyframes sidebarSlideIn {
+  0% {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes orderPanelSlideIn {
+  0% {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 7. Modal, Popover & Fullscreen Cart Spring Entrance */
+@keyframes modalSpringPop {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes backdropFadeIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes fullscreenCartExpand {
+  0% {
+    opacity: 0;
+    transform: translateY(24px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-stage-transition {
+  animation: stageFadeScale 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-menu-transition {
+  animation: menuPageEnter 290ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-subview-transition {
+  animation: subviewSlideIn 250ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-fade-in {
+  animation: modalSpringPop 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-modal-backdrop {
+  animation: backdropFadeIn 200ms ease-out both;
+}
+
+.animate-modal-pop {
+  animation: modalSpringPop 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-card-enter {
+  animation: cardStaggerEnter 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-cart-item-enter {
+  animation: cartItemSlideIn 230ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-sidebar-slide {
+  animation: sidebarSlideIn 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-order-panel-slide {
+  animation: orderPanelSlideIn 270ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-fullscreen-cart {
+  animation: fullscreenCartExpand 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Subtle clean scrollbars for POS panels */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(160, 174, 192, 0.35);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(160, 174, 192, 0.6);
+}
